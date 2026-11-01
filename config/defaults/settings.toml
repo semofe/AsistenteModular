@@ -1,0 +1,96 @@
+# Valores iniciales propuestos. No contienen credenciales.
+schema_version = 1
+
+[assistant]
+profile_file = "assistant.json"
+personality_file = "personality.txt"
+
+[desktop]
+start_with_windows = true
+hide_after_seconds = 120
+stop_render_when_hidden = true
+keep_avatar_loaded = true
+
+[conversation]
+reset_after_idle_seconds = 900
+allow_voice_interruptions = false
+automatic_summary = false
+response_style = "brief"
+max_output_tokens = 800
+
+[providers]
+active = "gemini"
+automatic_fallback = false
+
+[providers.gemini]
+model = "gemini-3.6-flash"
+credential_reference = "asistente/gemini"
+
+[providers.ollama]
+enabled = false
+base_url = "http://localhost:11434"
+model = ""
+
+[usage]
+monthly_budget_usd = 5.0
+input_token_budget = 6000
+rag_token_budget = 1000
+max_model_calls_per_request = 3
+alerts_percent = [50, 80, 100]
+block_cloud_at_budget = true
+
+[voice]
+wake_phrase_from_profile = true
+stt_engine = "hybrid_vosk_whisper"
+stt_model = "small"
+stt_device = "cpu"
+stt_compute_type = "int8"
+stt_beam_size = 5
+stt_cpu_threads = 6
+vosk_model = "vosk-model-small-es-0.42"
+vosk_min_confidence = 0.55
+tts_engine = "edge"
+edge_voice = "es-MX-DaliaNeural"
+tts_model = "kokoro-v1_0.pth"
+tts_voice = "af_alloy.pt"
+rvc_enabled = false
+rvc_model = "HatsuneMikuOv2.pth"
+rvc_index = "added_IVF397_Flat_nprobe_1_HatsuneMikuOv2_v2.index"
+rvc_pitch = 8
+# El detector de activación y la aceleración de RVC requieren pruebas.
+
+[voice.providers.elevenlabs]
+model = "eleven_flash_v2_5"
+voice_id = ""
+credential_reference = "asistente-assistant/elevenlabs"
+
+[voice.providers.fish]
+model = "s2-pro"
+reference_id = ""
+credential_reference = "asistente-assistant/fish"
+
+[voice.providers.custom]
+endpoint = ""
+model = ""
+voice = ""
+credential_reference = "asistente-assistant/custom"
+
+[voice.cache]
+enabled = true
+max_size_mb = 1024
+exact_match_only = true
+
+[memory]
+explicit_only = true
+auto_index_accessible_folders = false
+
+[camera]
+capture_on_request_only = true
+continuous_capture = false
+
+[automation]
+cloud_interpretation = false
+ask_before_running_missed_actions = true
+
+[offline]
+spoken_notice = "Estoy sin conexión. Puedo seguir ayudándote con las funciones locales, pero algunas opciones estarán limitadas."

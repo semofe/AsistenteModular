@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mensaje WebSocket de Asistente Modular v1",
+  "type": "object",
+  "required": ["version", "type", "request_id", "payload"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "type": "string" },
+    "request_id": { "type": ["string", "null"] },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" }
+  },
+  "additionalProperties": false
+}

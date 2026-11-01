@@ -1,0 +1,54 @@
+# Dependencias y entornos (se regeneran al instalar)
+node_modules/
+.venv/
+.venv-voice/
+venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+
+# Compilados y recursos generados
+out/
+dist/
+build/
+desktop/public/models/
+
+# Datos personales, credenciales y temporales
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.sqlite*
+*.db
+*.log
+runtime/
+voice/
+work/
+outputs/
+cache/
+logs/
+.npm-cache/
+.pip-cache/
+.pytest_cache/
+.tmp/
+backend/pytest-cache-files-*/
+backend/test-tmp*/
+
+# Modelos, audios y avatares externos
+*.glb
+*.vrm
+*.pth
+*.pt
+*.onnx
+*.index
+assets/voices/*
+assets/avatars/*
+!assets/voices/README.md
+!assets/avatars/README.md
+
+# Ajustes locales del editor y sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,9 @@
+# Entorno aislado de reconocimiento y Kokoro (Python 3.11 o 3.12).
+faster-whisper==1.2.1
+vosk==0.3.45
+kokoro==0.9.4
+numpy==2.3.5; python_version < "3.12"
+numpy==2.5.3; python_version >= "3.12"
+soundfile==0.14.0
+phonemizer-fork==3.3.2
+espeakng-loader==0.2.4

@@ -1,0 +1,12 @@
+{
+  "rules": [
+    {
+      "id": "assistant_name",
+      "response": "Me llamo {assistant_name}.",
+      "patterns": [
+        "(?:oye {assistant_name} )?(?:por favor )?(?:como te llamas|cual es tu nombre|dime tu nombre|que nombre tienes|quien eres)(?: por favor)?",
+        "(?:oye {assistant_name} )?(?:por favor )?(?:me puedes decir |puedes decirme )?(?:como te llamas|cual es tu nombre|tu nombre)(?: por favor)?"
+      ]
+    }
+  ]
+}

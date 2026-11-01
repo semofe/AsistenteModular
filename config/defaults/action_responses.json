@@ -1,0 +1,14 @@
+{
+  "success": "¡Hecho!",
+  "not_found": "No tengo acceso a esa aplicación.",
+  "failed": "No pude completar la acción.",
+  "unclear": "Perdón, ¿puedes repetirlo?",
+  "confirm": "¿Quieres abrir {targets}?",
+  "confirm_bare_open": "¿Abrir {targets}?",
+  "cancelled": "Entendido.",
+  "unsupported": "Esa función todavía no está disponible.",
+  "not_running": "No encuentro esa aplicación abierta.",
+  "confirm_close": "¿Quieres cerrar {targets}?",
+  "confirm_shutdown": "¿Deseas apagar la PC?",
+  "confirm_minimize": "¿Quieres minimizar {targets}?"
+}

@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "wake_phrase": "Oye {assistant_name}",
+  "wake_phrases": [
+    "Oye {assistant_name}",
+    "Ey {assistant_name}",
+    "Oeh {assistant_name}",
+    "y {assistant_name}",
+    "de {assistant_name}",
+    "{assistant_name}"
+  ],
+  "inactivity_seconds": 120,
+  "show_on_wake": true,
+  "hide_on_timeout": true
+}

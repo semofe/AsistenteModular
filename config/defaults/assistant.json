@@ -1,0 +1,5 @@
+{
+  "name": "Asistente Modular",
+  "language": "es",
+  "wake_phrase": "Oye {assistant_name}"
+}
