@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, session, Tray, type OpenDialogOptions } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, session, Tray, type OpenDialogOptions } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
@@ -71,11 +71,12 @@ function startBackend(): void {
 }
 
 function createWindow(): void {
+  const { width, height } = screen.getPrimaryDisplay().workAreaSize
   const window = new BrowserWindow({
-    width: 430,
-    height: 680,
-    minWidth: 360,
-    minHeight: 520,
+    width: Math.min(860, width),
+    height: Math.min(760, height),
+    minWidth: Math.min(460, width),
+    minHeight: Math.min(520, height),
     title: 'Asistente',
     frame: false,
     transparent: true,

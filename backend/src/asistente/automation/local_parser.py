@@ -26,7 +26,7 @@ def parse_open_command(text: str, assistant_name: str) -> str | None:
         rf"a\s+ver|haber|me\s+abres|puedes\s+abrir(?:me)?|"
         rf"me\s+puedes\s+abrir|podrias\s+abrir(?:me)?|quiero\s+abrir|"
         rf"quiero\s+que\s+abras|necesito\s+abrir|ve\s+abriendo|arranca|arrancar"
-        rf")\s+(?:el|la|los|las|mi|mis)?\s*(.+?)(?:\s+por favor)?",
+        rf")\s+(?:(?:el|la|los|las|mi|mis)\s+)?(.+?)(?:\s+por favor)?",
         normalized,
     )
     if not match:

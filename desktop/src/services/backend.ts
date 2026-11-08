@@ -366,6 +366,7 @@ export async function transcribeAudio(
 ): Promise<string> {
   const response = await fetch(`${HTTP_URL}/api/voice/transcribe?context=${context}`, {
     method: 'POST',
+    signal: AbortSignal.timeout(45000),
     headers: { 'Content-Type': blob.type || 'audio/webm' },
     body: blob
   })
@@ -464,6 +465,7 @@ export async function synthesizeSpeech(
 ): Promise<{ blob: Blob; provider: string; cacheHit: boolean; fallbackFrom?: string }> {
   const response = await fetch(`${HTTP_URL}/api/voice/synthesize`, {
     method: 'POST',
+    signal: AbortSignal.timeout(60000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, fragments, use_rvc: useRvc, engine, voice, model, endpoint })
   })

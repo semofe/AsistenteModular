@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import json
+import os
+from time import monotonic
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 import re
 import unicodedata
 import xml.etree.ElementTree as ElementTree
 
+from asistente.access.catalog import normalize_name
 from asistente.config.settings import FileAccessPreferenceStore
+from asistente.tools.search import EXTENSION_CATEGORIES
+
+
+_OPENABLE_EXTENSIONS = {
+    ".json", ".md", ".ppt", ".pptx",
+    *(extension for extensions in EXTENSION_CATEGORIES.values() for extension in extensions),
+}
 
 
 class FileAccessError(ValueError):
@@ -96,6 +106,61 @@ class FileAccessService:
             names = ", ".join(item[1]["name"] for item in candidates[:3])
             raise FileAccessError(f"Encontré varios archivos: {names}. Indica más palabras del nombre.")
         return candidates[0][1]["path"]
+
+    def find_openable(self, requested: str) -> list[Path]:
+        query = requested.removeprefix("archivo ")
+        name, separator, location = query.rpartition(" en ")
+        if not separator:
+            name, location = query, ""
+        location = location.removeprefix("la carpeta ").removeprefix("carpeta ")
+        if not name:
+            return []
+
+        full_query: set[Path] = set()
+        exact: set[Path] = set()
+        partial: set[Path] = set()
+        deadline = monotonic() + 3
+        for configured_folder in self.preferences.get()["folders"]:
+            try:
+                folder = Path(configured_folder).expanduser().resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            for directory, _, filenames in os.walk(folder):
+                if monotonic() > deadline:
+                    raise FileAccessError("La búsqueda tardó demasiado.")
+                parent = Path(directory)
+                in_location = not location or any(
+                    normalize_name(part) == location for part in parent.parts
+                )
+                for filename in filenames:
+                    if monotonic() > deadline:
+                        raise FileAccessError("La búsqueda tardó demasiado.")
+                    candidate = parent / filename
+                    if candidate.suffix.casefold() not in _OPENABLE_EXTENSIONS:
+                        continue
+                    stem = normalize_name(candidate.stem)
+                    full_name = normalize_name(filename)
+                    if query in {stem, full_name}:
+                        matches = full_query
+                    elif not in_location:
+                        continue
+                    elif name in {stem, full_name}:
+                        matches = exact
+                    elif f" {name} " in f" {stem} ":
+                        matches = partial
+                    else:
+                        continue
+                    try:
+                        target = candidate.resolve(strict=True)
+                    except (OSError, RuntimeError):
+                        continue
+                    if (
+                        target.is_relative_to(folder)
+                        and target.suffix.casefold() in _OPENABLE_EXTENSIONS
+                        and target.is_file()
+                    ):
+                        matches.add(target)
+        return sorted(full_query or exact or partial, key=lambda path: str(path).casefold())
 
     def read(self, target: str) -> tuple[Path, str]:
         path = self._authorized_path(target)

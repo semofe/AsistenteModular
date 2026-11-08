@@ -114,6 +114,54 @@ def test_search_platform_without_model():
     assert reply.handled
 
 
+@pytest.mark.parametrize("query,url,confirm", [
+    ("LinkedIn", "https://www.linkedin.com/", False),
+    ("Mercado Libre", "https://www.mercadolibre.com.pe/", False),
+    ("Instagram", "https://www.instagram.com/", False),
+    ("linkndin", "https://www.linkedin.com/", True),
+    ("instgram", "https://www.instagram.com/", True),
+    ("example.org", "https://example.org", False),
+    ("Sitio desconocido", "https://www.google.com/search?q=Sitio%20desconocido", False),
+])
+def test_enter_without_registered_website(query, url, confirm):
+    web = WebAccessService(None)
+    service = AccessToolService(None, web_tools=web)
+    with patch.object(web, "_open") as open_browser, patch(
+        "asistente.tools.websites._search_website", return_value=None
+    ):
+        reply = service.handle(f"Entra a {query}", "Asistente")
+        assert reply.handled
+        if confirm:
+            assert service.pending_website is not None
+            open_browser.assert_not_called()
+            service.handle("confirmo", "Asistente")
+        open_browser.assert_called_once_with(url)
+
+
+@pytest.mark.parametrize("second_result,expected", [
+    ("https://www.wikipedia.org/wiki/Example", "https://es.wikipedia.org/"),
+    ("https://wikipedia.org.evil.com/", "https://es.wikipedia.org/"),
+    ("https://wikipedia.com/", "https://www.google.com/search?q=Wikipedia"),
+])
+def test_enter_uses_unique_web_search_domain(second_result, expected):
+    response = httpx.Response(
+        200,
+        text=(
+            "<rss><channel><item><link>https://es.wikipedia.org/wiki/Main</link></item>"
+            f"<item><link>{second_result}</link></item></channel></rss>"
+        ),
+        request=httpx.Request("GET", "https://www.bing.com/search"),
+    )
+    web = WebAccessService(None)
+    service = AccessToolService(None, web_tools=web)
+    with patch.object(web, "_open") as open_browser, patch(
+        "asistente.tools.websites.httpx.get", return_value=response
+    ) as search:
+        assert service.handle("Entra a Wikipedia", "Asistente").handled
+        assert search.call_args.kwargs["params"] == {"q": "Wikipedia", "format": "rss"}
+        open_browser.assert_called_once_with(expected)
+
+
 def test_discovery_preserves_registered_apps():
     catalog=SimpleNamespace(resolve=lambda name: object() if name=='Existente' else None)
     with patch('asistente.access.discovery_windows.discover_start_menu_apps',return_value=[{'name':'Existente'},{'name':'Nueva'}]), patch.object(catalog,'add',create=True) as add:
@@ -155,6 +203,11 @@ def test_llm_configuration_applies_without_restart(tmp_path):
     ('Oye Asistente, busca noticias en Google por favor',('google','noticias')),
     ('Puedes poner jazz en Spotify?',('spotify','jazz')),
     ('Busca archivos PDF',None),
+    ('Entra a linkndin',('website','linkndin')),
+    ('Entra Mercado Libre',('website','Mercado Libre')),
+    ('Oye Asistente, entra en instgram por favor',('website','instgram')),
+    ('Entra a',None),
+    ('Abre Instagram',None),
 ])
 def test_platform_search_variants(command,expected):
     from asistente.tools.websites import parse_platform_search

@@ -23,7 +23,7 @@ desktop/public/models/
 *.db
 *.log
 runtime/
-voice/
+/voice/
 work/
 outputs/
 cache/

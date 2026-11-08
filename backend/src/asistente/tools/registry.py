@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from time import monotonic
 
 from asistente.access.catalog import AccessCatalog, AccessEntry, AccessMatch, normalize_name
@@ -32,6 +33,7 @@ from asistente.tools.applications import (
     minimize_entry,
     open_entry,
 )
+from asistente.tools.files import FileAccessError, FileAccessService
 from asistente.tools.websites import WebAccessService, parse_platform_search
 from asistente.access.web_catalog import WebsiteShortcut
 
@@ -69,10 +71,12 @@ class AccessToolService:
         catalog: AccessCatalog,
         responses: ActionResponseStore | None = None,
         web_tools: WebAccessService | None = None,
+        file_access: FileAccessService | None = None,
     ) -> None:
         self.catalog = catalog
         self.responses = responses
         self.web_tools = web_tools
+        self.file_access = file_access
         self.pending: PendingAccessCommand | None = None
         self.pending_website: PendingWebsiteCommand | None = None
         self.pending_shutdown_expires_at: float | None = None
@@ -301,9 +305,20 @@ class AccessToolService:
         return None
 
     def handle(self, text: str, assistant_name: str) -> LocalCommandResult:
+        is_confirmation = normalize_name(text) in POSITIVE_CONFIRMATIONS | NEGATIVE_CONFIRMATIONS
+        if not is_confirmation and (
+            self.pending or self.pending_website or self.pending_shutdown_expires_at is not None
+        ) and (
+            is_explicit_open_request(text)
+            or parse_platform_search(text, assistant_name)
+            or self.recognizes(text, assistant_name)
+        ):
+            self.pending = None
+            self.pending_website = None
+            self.pending_shutdown_expires_at = None
         if pending_result := self._handle_pending(text):
             return pending_result
-        if normalize_name(text) in POSITIVE_CONFIRMATIONS | NEGATIVE_CONFIRMATIONS:
+        if is_confirmation:
             return LocalCommandResult(True, self.unclear_message())
         if is_shutdown_command(text, assistant_name):
             self.pending_shutdown_expires_at = (
@@ -326,7 +341,17 @@ class AccessToolService:
             search = parse_platform_search(text, assistant_name)
             if search:
                 try:
-                    self.web_tools.open_search(*search)
+                    platform, query = search
+                    if platform == "website":
+                        site, needs_confirmation = self.web_tools.resolve_navigation(query)
+                        if site is not None:
+                            if needs_confirmation:
+                                return self._bare_website_confirmation(site)
+                            self.web_tools.open_website(site)
+                        else:
+                            self.web_tools.open_search("google", query)
+                    else:
+                        self.web_tools.open_search(platform, query)
                     return LocalCommandResult(True, self.success_message())
                 except (ValueError, RuntimeError, OSError):
                     return LocalCommandResult(True, self.failure_message())
@@ -387,6 +412,9 @@ class AccessToolService:
         else:
             matches = [self.catalog.match(requested)]
         if not matches or any(item is None for item in matches):
+            if self.file_access is not None and not recovered_from_stt and is_explicit_open_request(text):
+                if file_result := self._open_authorized_file(requested):
+                    return file_result
             if not recovered_from_stt and not is_explicit_open_request(text):
                 return LocalCommandResult(False)
             return LocalCommandResult(
@@ -407,6 +435,27 @@ class AccessToolService:
                 speech_fragments=self._confirmation_fragments(resolved_matches),
             )
         return self._execute(resolved_matches)
+
+    def _open_authorized_file(self, requested: str) -> LocalCommandResult | None:
+        if self.file_access is None:
+            return None
+        try:
+            matches = self.file_access.find_openable(requested)
+            if not matches:
+                return None
+            if len(matches) > 1:
+                choices = "\n".join(f"- {path.name} ({path.parent})" for path in matches[:5])
+                return LocalCommandResult(
+                    True,
+                    "Encontré varios archivos. Repite «Abre» con el nombre completo "
+                    "y, si hace falta, añade «en» y el nombre de la carpeta.\n" + choices,
+                )
+            os.startfile(str(matches[0]))
+        except FileAccessError as exc:
+            return LocalCommandResult(True, str(exc))
+        except (OSError, AttributeError):
+            return LocalCommandResult(True, self.failure_message())
+        return LocalCommandResult(True, self.success_message())
 
     def _handle_close(
         self, text: str, requested: str, recovered_from_stt: bool = False

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 import os
 import shutil
 from contextlib import asynccontextmanager
@@ -35,6 +37,7 @@ from asistente.tools.websites import WebAccessService
 from asistente.voice.manager import VoiceManager
 from asistente.memory.explicit_memory import ExplicitMemoryStore
 from asistente.memory.embeddings import GeminiEmbeddingProvider
+from asistente.memory.indexer import run_memory_indexer
 from asistente.automation.scheduler import LocalScheduler, ScheduleStore
 
 
@@ -86,8 +89,10 @@ def create_app() -> FastAPI:
             )
     action_responses = ActionResponseStore(action_responses_path)
     action_responses.ensure()
-    access_tools = AccessToolService(access_catalog, action_responses, WebAccessService(web_catalog))
     file_access = FileAccessService(file_access_preferences, paths["config"] / "file-index.json")
+    access_tools = AccessToolService(
+        access_catalog, action_responses, WebAccessService(web_catalog), file_access
+    )
     scheduler = LocalScheduler(schedule_store, access_tools)
     voice = VoiceManager(PROJECT_ROOT, paths["root"])
     api_key = voice.credentials.get("gemini")
@@ -117,9 +122,13 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await scheduler.start()
+        memory_indexer = asyncio.create_task(run_memory_indexer(memory_store))
         try:
             yield
         finally:
+            memory_indexer.cancel()
+            with suppress(asyncio.CancelledError):
+                await memory_indexer
             await scheduler.stop()
     app = FastAPI(
         title=f"{assistant_profile.get()['name']} Local API", version="0.1.0", lifespan=lifespan

@@ -5,6 +5,7 @@ Asistente para Windows con Electron, Vue 3, Three.js y backend Python/FastAPI. C
 ## Guías
 
 - [Instalación completa, dependencias y modelos](docs/INSTALACION.md)
+- [Estructura del código y trabajo pendiente](docs/ESTRUCTURA.md)
 - [Subir este proyecto a GitHub paso a paso](docs/GITHUB.md)
 
 ## Requisitos

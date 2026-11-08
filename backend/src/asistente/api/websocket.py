@@ -24,6 +24,17 @@ def create_websocket_router(orchestrator: Orchestrator) -> APIRouter:
                 raw = await socket.receive_text()
                 try:
                     message = ClientMessage.model_validate_json(raw)
+                except ValidationError as exc:
+                    await send(
+                        socket,
+                        ServerMessage(
+                            type="error",
+                            payload={"code": "invalid_message", "message": str(exc)},
+                        ),
+                    )
+                    continue
+
+                try:
                     if message.type == "ping":
                         await send(socket, ServerMessage(type="pong", request_id=message.request_id))
                         continue
@@ -80,20 +91,14 @@ def create_websocket_router(orchestrator: Orchestrator) -> APIRouter:
                             payload={"state": "idle"},
                         ),
                     )
-                except (ValidationError, ValueError) as exc:
-                    await send(
-                        socket,
-                        ServerMessage(
-                            type="error",
-                            payload={"code": "invalid_message", "message": str(exc)},
-                        ),
-                    )
+                except WebSocketDisconnect:
+                    raise
                 except Exception as exc:
                     await send(
                         socket,
                         ServerMessage(
                             type="error",
-                            request_id=getattr(message, "request_id", None),
+                            request_id=message.request_id,
                             payload={"code": "processing_error", "message": str(exc)},
                         ),
                     )

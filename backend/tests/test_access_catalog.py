@@ -239,6 +239,22 @@ def test_bare_application_name_requests_fragmented_open_confirmation(command: st
     assert confirmed.response == "¡Hecho!"
 
 
+def test_new_open_command_replaces_pending_confirmation() -> None:
+    steam = AccessEntry("steam", "Steam", "application", "steam.exe", [], [], None, True)
+    calc = AccessEntry("calc", "Calculadora", "application", "calc.exe", [], [], None, True)
+
+    class Catalog:
+        def resolve_exact(self, name: str) -> AccessEntry | None:
+            return {"steam": steam, "calculadora": calc}.get(name)
+
+    service = AccessToolService(Catalog())  # type: ignore[arg-type]
+    assert service.handle("Steam", "Asistente Modular").response == "¿Abrir Steam?"
+    with patch("asistente.tools.registry.open_entry") as opened:
+        assert service.handle("Abre calculadora", "Asistente Modular").response == "¡Hecho!"
+        service.handle("sí", "Asistente Modular")
+    opened.assert_called_once_with(calc)
+
+
 def test_two_accesses_are_resolved_before_both_are_opened() -> None:
     calculator = AccessEntry(
         "calculator", "Calculadora", "application", "calc.exe",

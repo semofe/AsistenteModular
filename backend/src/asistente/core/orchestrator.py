@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,7 +131,11 @@ class Orchestrator:
             if confirmed is not None:
                 self._extend_history([ChatMessage(role="user", content=clean_text), ChatMessage(role="assistant", content=confirmed)])
                 return AssistantReply(text=confirmed, session_tokens=self.session_tokens)
-        file_request = self.file_tools is not None and (self.file_tools.is_request(clean_text) or self.file_tools.awaiting_details) and not parse_platform_search(clean_text, self.assistant_profile.get()["name"] if self.assistant_profile else "")
+        assistant_name = self.assistant_profile.get()["name"] if self.assistant_profile else ""
+        web_request = parse_platform_search(clean_text, assistant_name)
+        file_request = self.file_tools is not None and (
+            self.file_tools.is_request(clean_text) or self.file_tools.awaiting_details
+        ) and not web_request
         if current_time := self._current_time_reply(clean_text):
             self._extend_history([
                 ChatMessage(role="user", content=clean_text),
@@ -138,7 +143,7 @@ class Orchestrator:
             ])
             return AssistantReply(text=current_time, session_tokens=self.session_tokens)
         if self.memory_store is not None:
-            captured = self.memory_store.capture_from_command(clean_text)
+            captured = await asyncio.to_thread(self.memory_store.capture_from_command, clean_text)
             if captured is not None:
                 response = "Lo recordaré."
                 self._extend_history([
@@ -151,12 +156,10 @@ class Orchestrator:
             self._extend_history([ChatMessage(role="user", content=clean_text), ChatMessage(role="assistant", content=scheduled)])
             return AssistantReply(text=scheduled, session_tokens=self.session_tokens)
         if self.access_tools is not None and not file_request:
-            assistant_name = (
-                self.assistant_profile.get()["name"]
-                if self.assistant_profile
-                else ""
-            )
-            local = self.access_tools.handle(clean_text, assistant_name)
+            if web_request and web_request[0] == "website":
+                local = await asyncio.to_thread(self.access_tools.handle, clean_text, assistant_name)
+            else:
+                local = self.access_tools.handle(clean_text, assistant_name)
             if local.handled:
                 self._extend_history(
                     [
@@ -199,7 +202,7 @@ class Orchestrator:
                     )
             except FileAccessError as exc:
                 return AssistantReply(text=str(exc), session_tokens=self.session_tokens)
-        recalled = self.memory_store.retrieve(clean_text) if self.memory_store else []
+        recalled = await asyncio.to_thread(self.memory_store.retrieve, clean_text) if self.memory_store else []
         memory_context = ""
         if recalled:
             memory_context = "Recuerdos explícitos del usuario (úsalos solo si son pertinentes):\n" + "\n".join(

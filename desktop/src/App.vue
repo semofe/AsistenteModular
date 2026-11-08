@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import Avatar3D from './components/avatar/Avatar3D.vue'
+import type { ChatItem } from './types/chat'
+import { useMemory } from './composables/useMemory'
+import { useSchedule } from './composables/useSchedule'
+import ConversationList from './components/chat/ConversationList.vue'
+import MemoryPanel from './components/memory/MemoryPanel.vue'
+import SchedulePanel from './components/schedule/SchedulePanel.vue'
+
 import {
   getLLMConfig,
   saveLLMConfig,
@@ -8,16 +15,10 @@ import {
   getConversationHistory,
   type LLMConfig,
   addAccessEntry,
-  addMemory,
-  addReminder,
-  addRoutine,
   addWebsiteShortcut,
   clearBrowserConfiguration,
   clearVoiceCache,
   deleteAccessEntry,
-  deleteMemory,
-  deleteReminder,
-  deleteRoutine,
   deleteVoiceCredential,
   getAssistantProfile,
   getConversationPreferences,
@@ -27,10 +28,6 @@ import {
   getBrowserConfiguration,
   getAccessEntries,
   getHealth,
-  getScheduledEvents,
-  getMemories,
-  getReminders,
-  getRoutines,
   getEdgeVoices,
   getVoiceCacheStats,
   getVoiceConfiguration,
@@ -59,23 +56,8 @@ import {
   type ServerMessage,
   type VoiceEngine,
   type WebsiteShortcut
-  , type MemoryEntry
-  , type Reminder
-  , type Routine
 } from './services/backend'
 
-interface ChatItem {
-  id: string
-  role: 'user' | 'assistant' | 'system'
-  text: string
-  usage?: {
-    input: number
-    output: number
-    thinking: number
-    total: number
-    session: number
-  }
-}
 
 const llmConfig = ref<LLMConfig>({provider: 'gemini', gemini_model: 'gemini-3.6-flash', ollama_model: 'llama3.2:1b'})
 const savingLLM = ref(false)
@@ -130,8 +112,27 @@ const edgeVoices = ref<EdgeVoice[]>([])
 const voiceMenuOpen = ref(false)
 const voiceSearch = ref('')
 const recording = ref(false)
+const microphoneStorageKey = 'asistente.microphone'
+const selectedMicrophone = ref(localStorage.getItem(microphoneStorageKey) ?? '')
+const microphones = ref<MediaDeviceInfo[]>([])
+const detectingMicrophones = ref(false)
+const microphoneError = ref('')
+const selectedMicrophoneMissing = computed(() => Boolean(selectedMicrophone.value)
+  && !microphones.value.some(device => device.deviceId === selectedMicrophone.value))
 type CredentialProvider = 'gemini' | 'elevenlabs' | 'fish' | 'custom'
 const settingsOpen = ref(false)
+const settingsSections = [
+  { id: 'general', label: 'General' },
+  { id: 'model', label: 'Modelo y claves' },
+  { id: 'voice', label: 'Voz' },
+  { id: 'apps', label: 'Aplicaciones' },
+  { id: 'files', label: 'Archivos' },
+  { id: 'web', label: 'Navegador y web' },
+  { id: 'memory', label: 'Memoria y rutinas' },
+  { id: 'activity', label: 'Actividad' }
+] as const
+type SettingsSection = typeof settingsSections[number]['id']
+const activeSettingsSection = ref<SettingsSection>('general')
 const providerKeys = ref<Record<CredentialProvider, string>>({
   gemini: '',
   elevenlabs: '',
@@ -167,27 +168,15 @@ const websiteUrl = ref('')
 const websiteAliases = ref('')
 const websites = ref<WebsiteShortcut[]>([])
 const webBusy = ref(false)
-const memories = ref<MemoryEntry[]>([])
-const memoryDraft = ref('')
-const memoryBusy = ref(false)
-const reminders = ref<Reminder[]>([])
-const reminderTitle = ref('')
-const reminderAt = ref('')
-const reminderAction = ref<'notify' | 'open_access'>('notify')
-const reminderAccessId = ref('')
-const routines = ref<Routine[]>([])
-const routineName = ref('')
-const routineTime = ref('09:00')
-const routineAccessIds = ref<string[]>([])
-const routineDays = ref<number[]>([0, 1, 2, 3, 4, 5, 6])
-const scheduleBusy = ref(false)
 let recorder: MediaRecorder | undefined
 let recordingStream: MediaStream | undefined
 let chunks: Blob[] = []
 let currentAudio: HTMLAudioElement | undefined
 let speechPending = false
+let speechQueue = Promise.resolve()
 let microphoneResumeAt = 0
 let activationStream: MediaStream | undefined
+let activationListenerVersion = 0
 let activationContext: AudioContext | undefined
 let activationAnalyser: AnalyserNode | undefined
 let activationFrame = 0
@@ -196,6 +185,7 @@ let activationChunks: Blob[] = []
 let activationStartedAt = 0
 let activationSilenceAt = 0
 let activationBusy = false
+let lastActivationError = ''
 let discardActivationAudio = false
 let inactivityTimer: number | undefined
 let schedulePollTimer: number | undefined
@@ -203,6 +193,10 @@ let removeOpenSettingsListener: (() => void) | undefined
 const messages = ref<ChatItem[]>([
   { id: 'welcome', role: 'assistant', text: 'Hola. El motor local está iniciando.' }
 ])
+
+const { memories, memoryDraft, memoryBusy, refreshMemory, storeMemory, removeMemory } = useMemory(messages)
+
+const { reminders, reminderTitle, reminderAt, reminderAction, reminderAccessId, routines, routineName, routineTime, routineAccessIds, routineDays, scheduleBusy, refreshSchedule, pollScheduledEvents, storeReminder, removeReminder, toggleRoutineDay, storeRoutine, removeRoutine } = useSchedule(messages, speak)
 
 const canSend = computed(() => ['idle', 'dormant'].includes(state.value) && input.value.trim().length > 0)
 const regularAccessEntries = computed(() => accessEntries.value.filter((entry) => entry.close_policy !== 'window'))
@@ -508,102 +502,6 @@ async function removeWebsite(site: WebsiteShortcut): Promise<void> {
   } finally { webBusy.value = false }
 }
 
-async function refreshMemory(): Promise<void> {
-  try { memories.value = await getMemories() } catch (error) {
-    messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Memoria: ${String(error)}` })
-  }
-}
-
-async function storeMemory(): Promise<void> {
-  if (!memoryDraft.value.trim()) return
-  memoryBusy.value = true
-  try {
-    const entry = await addMemory(memoryDraft.value.trim())
-    memories.value.unshift(entry)
-    memoryDraft.value = ''
-  } catch (error) {
-    messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Memoria: ${String(error)}` })
-  } finally { memoryBusy.value = false }
-}
-
-async function removeMemory(entry: MemoryEntry): Promise<void> {
-  memoryBusy.value = true
-  try {
-    await deleteMemory(entry.id)
-    memories.value = memories.value.filter((item) => item.id !== entry.id)
-  } catch (error) {
-    messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Memoria: ${String(error)}` })
-  } finally { memoryBusy.value = false }
-}
-
-async function refreshSchedule(): Promise<void> {
-  try {
-    const [savedReminders, savedRoutines] = await Promise.all([getReminders(), getRoutines()])
-    reminders.value = savedReminders
-    routines.value = savedRoutines
-  } catch (error) {
-    messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Agenda: ${String(error)}` })
-  }
-}
-
-async function pollScheduledEvents(): Promise<void> {
-  try {
-    const events = await getScheduledEvents()
-    for (const text of events) {
-      messages.value.push({ id: crypto.randomUUID(), role: 'assistant', text })
-      void speak(text)
-    }
-  } catch { /* The backend can be starting; the next poll retries. */ }
-}
-
-async function storeReminder(): Promise<void> {
-  if (!reminderTitle.value.trim() || !reminderAt.value) return
-  scheduleBusy.value = true
-  try {
-    const entry = await addReminder({
-      title: reminderTitle.value.trim(), due_at: new Date(reminderAt.value).toISOString(),
-      action_type: reminderAction.value,
-      access_id: reminderAction.value === 'open_access' ? reminderAccessId.value || null : null
-    })
-    reminders.value = [...reminders.value, entry].sort((a, b) => a.due_at.localeCompare(b.due_at))
-    reminderTitle.value = ''; reminderAt.value = ''; reminderAccessId.value = ''
-  } catch (error) {
-    messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Recordatorio: ${String(error)}` })
-  } finally { scheduleBusy.value = false }
-}
-
-async function removeReminder(entry: Reminder): Promise<void> {
-  scheduleBusy.value = true
-  try { await deleteReminder(entry.id); reminders.value = reminders.value.filter((item) => item.id !== entry.id) }
-  catch (error) { messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Recordatorio: ${String(error)}` }) }
-  finally { scheduleBusy.value = false }
-}
-
-function toggleRoutineDay(day: number): void {
-  routineDays.value = routineDays.value.includes(day)
-    ? routineDays.value.filter((item) => item !== day)
-    : [...routineDays.value, day].sort()
-}
-
-async function storeRoutine(): Promise<void> {
-  if (!routineName.value.trim() || !routineAccessIds.value.length || !routineDays.value.length) return
-  scheduleBusy.value = true
-  try {
-    const entry = await addRoutine({ name: routineName.value.trim(), time_of_day: routineTime.value, days: routineDays.value, access_ids: routineAccessIds.value })
-    routines.value = [...routines.value, entry].sort((a, b) => a.time_of_day.localeCompare(b.time_of_day))
-    routineName.value = ''; routineAccessIds.value = []
-  } catch (error) {
-    messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Rutina: ${String(error)}` })
-  } finally { scheduleBusy.value = false }
-}
-
-async function removeRoutine(entry: Routine): Promise<void> {
-  scheduleBusy.value = true
-  try { await deleteRoutine(entry.id); routines.value = routines.value.filter((item) => item.id !== entry.id) }
-  catch (error) { messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Rutina: ${String(error)}` }) }
-  finally { scheduleBusy.value = false }
-}
-
 function normalizeSpeech(value: string): string {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase()
     .replace(/[^a-z0-9]+/g, ' ').trim()
@@ -674,11 +572,11 @@ function sendRecognizedText(text: string): void {
 async function processActivationAudio(blob: Blob): Promise<void> {
   if (blob.size < 500) return
   activationBusy = true
-  const previousState = state.value
   if (activationSession.value) state.value = 'transcribing'
   try {
     const context = activationSession.value ? 'active' : 'dormant'
     const text = await transcribeAudio(blob, context)
+    lastActivationError = ''
     if (!text.trim()) return
     const wakeCommand = commandAfterWakePhrase(text)
     if (!activationSession.value) {
@@ -689,16 +587,16 @@ async function processActivationAudio(blob: Blob): Promise<void> {
     }
     if (wakeCommand === null) sendRecognizedText(text)
     else if (wakeCommand) sendRecognizedText(`${wakePhrase.value} ${wakeCommand}`)
-  } catch {
-    if (activationSession.value) {
-      messages.value.push({ id: crypto.randomUUID(), role: 'system', text: 'No pude transcribir el audio de activación.' })
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    if (detail !== lastActivationError) {
+      lastActivationError = detail
+      messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Transcripción de voz: ${detail}` })
     }
   } finally {
     activationBusy = false
-    if (!['processing', 'speaking'].includes(state.value)) {
+    if (state.value === 'transcribing') {
       state.value = activationSession.value ? 'idle' : 'dormant'
-    } else if (previousState === 'dormant' && !activationSession.value) {
-      state.value = 'dormant'
     }
   }
 }
@@ -754,25 +652,102 @@ function monitorActivation(): void {
   }
 }
 
-async function startActivationListener(): Promise<void> {
-  if (!activationEnabled.value || activationStream) return
+async function openMicrophone(audio: MediaTrackConstraints = {}): Promise<MediaStream> {
+  const deviceId = selectedMicrophone.value
+  if (deviceId) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: { ...audio, deviceId: { exact: deviceId } } })
+    } catch (error) {
+      if (!(error instanceof DOMException) || !['NotFoundError', 'OverconstrainedError', 'NotReadableError'].includes(error.name)) throw error
+    }
+  }
+  return navigator.mediaDevices.getUserMedia({ audio })
+}
+
+async function refreshMicrophones(): Promise<void> {
+  const devices = await navigator.mediaDevices?.enumerateDevices() ?? []
+  microphones.value = devices.filter(device =>
+    device.kind === 'audioinput' && device.deviceId && !['default', 'communications'].includes(device.deviceId)
+  )
+}
+
+async function detectMicrophones(): Promise<void> {
+  detectingMicrophones.value = true
+  microphoneError.value = ''
+  let stream: MediaStream | undefined
   try {
-    activationStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-    })
-    activationContext = new AudioContext()
-    await activationContext.resume()
-    activationAnalyser = activationContext.createAnalyser()
-    activationAnalyser.fftSize = 512
-    activationContext.createMediaStreamSource(activationStream).connect(activationAnalyser)
+    if (!activationStream) stream = await openMicrophone()
+    await refreshMicrophones()
+  } catch {
+    microphoneError.value = 'No pude detectar los micrófonos. Revisa el permiso de micrófono en Windows.'
+  } finally {
+    stream?.getTracks().forEach(track => track.stop())
+    detectingMicrophones.value = false
+  }
+}
+
+async function restartActivationMicrophone(): Promise<void> {
+  stopActivationListener()
+  await startActivationListener(false)
+}
+
+async function changeMicrophone(event: Event): Promise<void> {
+  selectedMicrophone.value = (event.target as HTMLSelectElement).value
+  localStorage.setItem(microphoneStorageKey, selectedMicrophone.value)
+  microphoneError.value = ''
+  if (activationEnabled.value) await restartActivationMicrophone()
+}
+
+async function handleMicrophoneDeviceChange(): Promise<void> {
+  const wasMissing = selectedMicrophoneMissing.value
+  try {
+    await refreshMicrophones()
+  } catch {
+    return
+  }
+  if (activationEnabled.value && wasMissing !== selectedMicrophoneMissing.value) {
+    await restartActivationMicrophone()
+  }
+}
+
+async function startActivationListener(initializeSession = true): Promise<void> {
+  if (!activationEnabled.value || activationStream) return
+  const version = ++activationListenerVersion
+  let stream: MediaStream | undefined
+  let context: AudioContext | undefined
+  try {
+    stream = await openMicrophone({ echoCancellation: true, noiseSuppression: true, autoGainControl: true })
+    if (version !== activationListenerVersion) return
+    context = new AudioContext()
+    await context.resume()
+    if (version !== activationListenerVersion) return
+    const analyser = context.createAnalyser()
+    analyser.fftSize = 512
+    context.createMediaStreamSource(stream).connect(analyser)
+    activationStream = stream
+    activationContext = context
+    activationAnalyser = analyser
     activationFrame = window.setInterval(monitorActivation, 80)
-    activateSession(false)
+    stream.getAudioTracks()[0]?.addEventListener('ended', () => {
+      if (activationStream === stream) void restartActivationMicrophone()
+    }, { once: true })
+    if (initializeSession) activateSession(false)
+    else scheduleInactivity()
+    void refreshMicrophones().catch(() => {})
   } catch (error) {
-    messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Activación por voz: ${String(error)}` })
+    if (version === activationListenerVersion) {
+      messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Activación por voz: ${String(error)}` })
+    }
+  } finally {
+    if (stream !== activationStream) {
+      stream?.getTracks().forEach(track => track.stop())
+      void context?.close()
+    }
   }
 }
 
 function stopActivationListener(): void {
+  activationListenerVersion++
   window.clearInterval(activationFrame)
   cancelActivationUtterance()
   activationStream?.getTracks().forEach((track) => track.stop())
@@ -905,7 +880,44 @@ async function storeVoicePreferences(): Promise<void> {
   }
 }
 
-async function speak(text: string, fragments?: string[]): Promise<void> {
+async function playResponseAudio(blob: Blob): Promise<void> {
+  const url = URL.createObjectURL(blob)
+  const audio = new Audio(url)
+  currentAudio = audio
+  const events = new AbortController()
+  let watchdog: number | undefined
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const resetWatchdog = (milliseconds: number) => {
+        window.clearTimeout(watchdog)
+        watchdog = window.setTimeout(() => reject(new Error('La reproducción de voz se quedó detenida.')), milliseconds)
+      }
+      const options = { once: true, signal: events.signal }
+      audio.addEventListener('ended', () => resolve(), options)
+      audio.addEventListener('pause', () => resolve(), options)
+      audio.addEventListener('error', () => reject(new Error('No pude reproducir la respuesta de voz.')), options)
+      audio.addEventListener('playing', () => {
+        resetWatchdog(Number.isFinite(audio.duration) ? Math.max(15000, (audio.duration + 5) * 1000) : 60000)
+      }, options)
+      resetWatchdog(15000)
+      void audio.play().catch(reject)
+    })
+  } finally {
+    events.abort()
+    window.clearTimeout(watchdog)
+    audio.pause()
+    currentAudio = undefined
+    URL.revokeObjectURL(url)
+  }
+}
+
+function speak(text: string, fragments?: string[]): Promise<void> {
+  const response = speechQueue.then(() => speakResponse(text, fragments))
+  speechQueue = response.catch(() => {})
+  return response
+}
+
+async function speakResponse(text: string, fragments?: string[]): Promise<void> {
   if (!voiceOutput.value) return
   const spokenText = text
     .replace(/```[\s\S]*?```/g, ' ')
@@ -946,26 +958,20 @@ async function speak(text: string, fragments?: string[]): Promise<void> {
         text: `${result.fallbackFrom} no estuvo disponible; se utilizó ${result.provider}.`
       })
     }
-    try {
-      cacheStats.value = await getVoiceCacheStats()
-    } catch {
+    void getVoiceCacheStats().then(stats => {
+      cacheStats.value = stats
+    }).catch(() => {
       if (result.cacheHit) cacheStats.value.hits += 1
-    }
-    const url = URL.createObjectURL(result.blob)
-    currentAudio = new Audio(url)
-    await currentAudio.play()
-    await new Promise<void>((resolve) => {
-      if (!currentAudio) return resolve()
-      currentAudio.onended = () => resolve()
-      currentAudio.onerror = () => resolve()
     })
-    URL.revokeObjectURL(url)
+    await playResponseAudio(result.blob)
   } catch (error) {
     messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Voz: ${String(error)}` })
   } finally {
     speechPending = false
     microphoneResumeAt = Date.now() + 900
-    state.value = 'idle'
+    if (state.value === 'speaking') {
+      state.value = activationEnabled.value && !activationSession.value ? 'dormant' : 'idle'
+    }
     scheduleInactivity()
   }
 }
@@ -1041,7 +1047,8 @@ async function toggleRecording(): Promise<void> {
   activateSession()
   cancelActivationUtterance()
   try {
-    recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    recordingStream = await openMicrophone()
+    void refreshMicrophones().catch(() => {})
     chunks = []
     recorder = new MediaRecorder(recordingStream)
     recorder.ondataavailable = (event) => {
@@ -1071,6 +1078,8 @@ async function toggleRecording(): Promise<void> {
 }
 
 onMounted(async () => {
+  navigator.mediaDevices?.addEventListener('devicechange', handleMicrophoneDeviceChange)
+  void refreshMicrophones().catch(() => {})
   removeOpenSettingsListener = window.asistenteDesktop?.onOpenSettings(() => {
     settingsOpen.value = true
     window.clearTimeout(inactivityTimer)
@@ -1146,6 +1155,7 @@ onMounted(async () => {
   schedulePollTimer = window.setInterval(() => { void pollScheduledEvents() }, 10_000)
 })
 onBeforeUnmount(() => {
+  navigator.mediaDevices?.removeEventListener('devicechange', handleMicrophoneDeviceChange)
   removeOpenSettingsListener?.()
   socket.close()
   recorder?.stop()
@@ -1162,393 +1172,381 @@ onBeforeUnmount(() => {
       <Avatar3D :state="state" :assistant-name="assistantName" />
     </section>
 
-    <section class="conversation main-conversation" aria-label="Conversación actual">
-      <article v-for="message in messages" :key="message.id" :class="message.role">
-        <span>{{ message.text }}</span>
-        <small v-if="message.usage && message.usage.total > 0">
-          {{ message.usage.total }} tokens · {{ message.usage.input }} entrada ·
-          {{ message.usage.output }} salida<span v-if="message.usage.thinking > 0">
-            · {{ message.usage.thinking }} razonamiento</span> · sesión {{ message.usage.session }}
-        </small>
-      </article>
-    </section>
+    <ConversationList class="main-conversation" aria-label="Conversación actual" :messages="messages" />
 
-    <section v-if="settingsOpen" class="settings-panel">
-      <section class="credential-module">
-        <strong>Modelo de conversación</strong>
-        <select v-model="llmConfig.provider"><option value="gemini">Gemini</option><option value="ollama">Ollama local</option></select>
-        <input v-if="llmConfig.provider === 'gemini'" v-model="llmConfig.gemini_model" placeholder="Modelo Gemini" />
-        <input v-else v-model="llmConfig.ollama_model" placeholder="Modelo Ollama" />
-        <button type="button" :disabled="savingLLM" @click="updateLLM">{{ savingLLM ? 'Aplicando…' : 'Aplicar modelo' }}</button>
-        <button type="button" :disabled="syncingApps" @click="detectApps">{{ syncingApps ? 'Buscando…' : 'Detectar aplicaciones instaladas' }}</button>
-        <small>{{ modelStatus }}</small>
-        <small>Archivos: puedes buscar, crear TXT, CSV, Word, Excel, PowerPoint y PDF; copiar, mover y renombrar. Las modificaciones requieren confirmación.</small>
-      </section>
+    <section v-if="settingsOpen" class="settings-panel" aria-labelledby="settings-heading">
       <div class="settings-panel-header">
-        <div><strong>Configuración</strong><small>Personaliza el funcionamiento de {{ assistantName }}</small></div>
+        <div><h1 id="settings-heading">Configuración</h1><small>Personaliza el funcionamiento de {{ assistantName }}</small></div>
         <div class="settings-panel-actions">
           <button type="button" title="Nueva conversación" aria-label="Nueva conversación" @click="socket.clearConversation">↻</button>
           <button type="button" title="Cerrar configuración" aria-label="Cerrar configuración" @click="settingsOpen = false">×</button>
         </div>
       </div>
-      <div class="assistant-name-setting">
-        <div>
-          <strong>Nombre del asistente</strong>
-          <small>Frase de activación: “{{ wakePhrase }}”</small>
-        </div>
-        <div>
-          <input v-model="assistantNameDraft" maxlength="40" placeholder="Nombre" />
+      <div class="settings-layout">
+        <nav class="settings-nav" aria-label="Secciones de configuración">
           <button
+            v-for="section in settingsSections"
+            :key="section.id"
             type="button"
-            :disabled="savingAssistantName || !assistantNameDraft.trim()"
-            @click="storeAssistantName"
-          >{{ savingAssistantName ? 'Guardando…' : 'Aplicar' }}</button>
-        </div>
-      </div>
-      <div class="activation-settings">
-        <div>
-          <strong>Activación por voz</strong>
-          <small>Frases dinámicas con el nombre actual</small>
-        </div>
-        <label><input v-model="activationEnabled" type="checkbox" /> Escuchar en segundo plano</label>
-        <label>
-          Ocultar después de
-          <input v-model.number="inactivitySeconds" type="number" min="30" max="1800" step="30" />
-          segundos
-        </label>
-        <button type="button" :disabled="savingActivation" @click="storeActivationSettings">
-          {{ savingActivation ? 'Guardando…' : 'Guardar activación' }}
-        </button>
-        <small>Frases actuales: {{ wakePhrases.join(' · ') }}</small>
-      </div>
-      <div class="settings-title">
-        <div><strong>Claves API</strong><small>Se guardan de forma segura en el Administrador de credenciales de Windows</small></div>
-      </div>
-      <section class="credential-module">
-        <div class="credential-module-heading">
-          <strong>Claves API del agente</strong>
-          <small>Necesarias para conversar, usar la búsqueda web y la memoria semántica.</small>
-        </div>
-        <div v-for="provider in agentCredentialProviders" :key="provider.id" class="api-provider">
-          <div class="provider-name">
-            <strong>{{ provider.name }}</strong>
-            <small>{{ provider.detail }}</small>
-          </div>
-          <span class="credential-state" :class="{ configured: credentials[provider.id] }">
-            {{ credentials[provider.id] ? 'Configurada' : 'Sin clave' }}
-          </span>
-          <input
-            v-model="providerKeys[provider.id]"
-            type="password"
-            :placeholder="credentials[provider.id] ? 'Escribe otra clave para reemplazarla' : 'API key'"
-            autocomplete="new-password"
-          />
-          <button
-            type="button"
-            :disabled="savingCredential !== null || providerKeys[provider.id].trim().length < 8"
-            @click="storeProviderKey(provider.id)"
-          >{{ savingCredential === provider.id ? '…' : 'Guardar' }}</button>
-          <button
-            type="button"
-            class="delete-key"
-            :disabled="savingCredential !== null || !credentials[provider.id]"
-            title="Eliminar clave"
-            @click="removeProviderKey(provider.id)"
-          >Eliminar</button>
-        </div>
-      </section>
-      <section class="credential-module">
-        <div class="credential-module-heading">
-          <strong>Claves API de voz</strong>
-          <small>Solo necesitas configurar el proveedor de voz que elijas.</small>
-        </div>
-        <div v-for="provider in voiceCredentialProviders" :key="provider.id" class="api-provider">
-          <div class="provider-name">
-            <strong>{{ provider.name }}</strong>
-            <small>{{ provider.detail }}</small>
-          </div>
-          <span class="credential-state" :class="{ configured: credentials[provider.id] }">
-            {{ credentials[provider.id] ? 'Configurada' : 'Sin clave' }}
-          </span>
-          <input
-            v-model="providerKeys[provider.id]"
-            type="password"
-            :placeholder="credentials[provider.id] ? 'Escribe otra clave para reemplazarla' : 'API key'"
-            autocomplete="new-password"
-          />
-          <button
-            type="button"
-            :disabled="savingCredential !== null || providerKeys[provider.id].trim().length < 8"
-            @click="storeProviderKey(provider.id)"
-          >{{ savingCredential === provider.id ? '…' : 'Guardar' }}</button>
-          <button
-            type="button"
-            class="delete-key"
-            :disabled="savingCredential !== null || !credentials[provider.id]"
-            title="Eliminar clave"
-            @click="removeProviderKey(provider.id)"
-          >Eliminar</button>
-        </div>
-      </section>
-
-      <div class="access-settings file-access-settings">
-        <div class="settings-title access-heading">
-          <div><strong>Lectura de archivos</strong><small>Asistente Modular solo leerá archivos dentro de estas carpetas y con los tipos indicados.</small></div>
-        </div>
-        <div class="target-picker">
-          <input v-model="fileAccessFolderDraft" placeholder="Carpeta autorizada para lectura" />
-          <button type="button" @click="chooseFileAccessFolder">Examinar</button>
-        </div>
-        <button class="add-file-folder" type="button" :disabled="!fileAccessFolderDraft.trim()" @click="addFileAccessFolder">Añadir carpeta</button>
-        <div class="file-folder-list">
-          <div v-for="folder in fileAccessPreferences.folders" :key="folder" class="file-folder-entry">
-            <span :title="folder">{{ folder }}</span>
-            <button type="button" class="delete-key" :disabled="savingFileAccess" @click="removeFileAccessFolder(folder)">Quitar</button>
-          </div>
-          <small v-if="fileAccessPreferences.folders.length === 0">No hay carpetas autorizadas: Asistente Modular no puede leer ningún archivo todavía.</small>
-        </div>
-        <label class="file-extensions">
-          Tipos permitidos
-          <input v-model="fileAccessExtensionsDraft" maxlength="300" placeholder="txt, md, csv, json, docx" />
-          <small>Escribe extensiones separadas por comas, sin punto. Disponibles: txt, md, csv, json y docx.</small>
-        </label>
-        <button type="button" :disabled="savingFileAccess" @click="storeFileAccessPreferences">
-          {{ savingFileAccess ? 'Guardando…' : 'Guardar permisos de lectura' }}
-        </button>
-        <div class="file-index-heading">
-          <div><strong>Índice local</strong><small>{{ indexedFiles.length }} archivos autorizados por nombre.</small></div>
-          <button type="button" :disabled="refreshingFileIndex || savingFileAccess" @click="updateFileIndex">{{ refreshingFileIndex ? 'Actualizando…' : 'Actualizar archivos' }}</button>
-        </div>
-        <div v-if="indexedFiles.length" class="indexed-file-list">
-          <span v-for="file in indexedFiles.slice(0, 8)" :key="file.path" :title="file.path">{{ file.name }}</span>
-          <small v-if="indexedFiles.length > 8">y {{ indexedFiles.length - 8 }} más</small>
-        </div>
-        <small class="file-reading-help">Luego puedes decir “Resume el informe de robótica” sin escribir la ruta. Actualiza el índice si agregas, renombras o eliminas archivos.</small>
-      </div>
-
-      <div class="access-settings">
-        <div class="settings-title access-heading">
-          <div><strong>Accesos permitidos</strong><small>Aplicaciones, archivos y carpetas que el asistente puede abrir</small></div>
-        </div>
-        <div class="access-form">
-          <input v-model="accessName" maxlength="80" placeholder="Nombre, por ejemplo: Steam" />
-          <select v-model="accessKind">
-            <option value="application">Aplicación</option>
-            <option value="file">Archivo</option>
-            <option value="folder">Carpeta</option>
-          </select>
-          <div class="target-picker">
-            <input v-model="accessTarget" :placeholder="accessTargetPlaceholder" />
-            <button type="button" @click="chooseAccessTarget">Examinar</button>
-          </div>
-          <input class="access-wide" v-model="accessAliases" placeholder="Alias separados por comas: steam, juegos" />
-          <input class="access-wide" v-model="accessSpokenName" placeholder="Nombre pronunciado (opcional)" />
-          <button
-            type="button"
-            :disabled="accessBusy || !accessName.trim() || !accessTarget.trim()"
-            @click="storeAccessEntry"
-          >Añadir acceso</button>
-        </div>
-        <div class="access-list">
-          <div v-for="entry in regularAccessEntries" :key="entry.id" class="access-entry">
-            <div>
-              <strong>{{ entry.name }}</strong>
-              <small>{{ entry.kind }} · {{ entry.aliases.join(', ') || 'sin alias' }}</small>
-              <span :title="entry.target">{{ entry.target }}</span>
-              <div class="spoken-name-editor">
-                <input v-model="entry.spoken_name" maxlength="120" aria-label="Nombre pronunciado" />
-                <button type="button" :disabled="accessBusy || !entry.spoken_name.trim()" @click="storeAccessSpokenName(entry)">Voz</button>
+            :aria-pressed="activeSettingsSection === section.id"
+            @click="activeSettingsSection = section.id"
+          >{{ section.label }}</button>
+        </nav>
+        <div :key="activeSettingsSection" class="settings-content">
+          <div v-if="activeSettingsSection === 'general'" class="settings-section">
+            <div class="assistant-name-setting">
+              <div>
+                <strong>Nombre del asistente</strong>
+                <small>Frase de activación: “{{ wakePhrase }}”</small>
+              </div>
+              <div>
+                <input v-model="assistantNameDraft" maxlength="40" placeholder="Nombre" />
+                <button
+                  type="button"
+                  :disabled="savingAssistantName || !assistantNameDraft.trim()"
+                  @click="storeAssistantName"
+                >{{ savingAssistantName ? 'Guardando…' : 'Aplicar' }}</button>
               </div>
             </div>
-            <button type="button" title="Probar acceso" @click="launchAccessEntry(entry)">Abrir</button>
-            <button type="button" class="delete-key" :disabled="accessBusy" @click="removeAccessEntry(entry)">Eliminar</button>
-          </div>
-          <small v-if="regularAccessEntries.length === 0">Aún no hay accesos configurados.</small>
-        </div>
-      </div>
-
-      <div class="access-settings">
-        <div class="settings-title access-heading">
-          <div><strong>Launchers de juegos</strong><small>Al decir “cierra”, Asistente Modular cierra la ventana sin matar el proceso</small></div>
-        </div>
-        <div class="access-form">
-          <input v-model="launcherName" maxlength="80" placeholder="Nombre, por ejemplo: Steam" />
-          <input v-model="launcherAliases" placeholder="Alias: steam, vapor" />
-          <div class="target-picker">
-            <input v-model="launcherTarget" placeholder="Ruta del launcher .exe o .lnk" />
-            <button type="button" @click="chooseApplicationTarget('launcher')">Examinar</button>
-          </div>
-          <button type="button" :disabled="accessBusy || !launcherName.trim() || !launcherTarget.trim()" @click="storeLauncher">Añadir launcher</button>
-        </div>
-        <div class="access-list">
-          <div v-for="entry in launcherEntries" :key="entry.id" class="access-entry">
-            <div>
-              <strong>{{ entry.name }}</strong>
-              <small>cierre de ventana · {{ entry.aliases.join(', ') || 'sin alias' }}</small>
-              <span :title="entry.target">{{ entry.target }}</span>
+            <div class="activation-settings">
+              <div>
+                <strong>Activación por voz</strong>
+                <small>Frases dinámicas con el nombre actual</small>
+              </div>
+              <label><input v-model="activationEnabled" type="checkbox" /> Escuchar en segundo plano</label>
+              <label>
+                Ocultar después de
+                <input v-model.number="inactivitySeconds" type="number" min="30" max="1800" step="30" />
+                segundos
+              </label>
+              <button type="button" :disabled="savingActivation" @click="storeActivationSettings">
+                {{ savingActivation ? 'Guardando…' : 'Guardar activación' }}
+              </button>
+              <small>Frases actuales: {{ wakePhrases.join(' · ') }}</small>
             </div>
-            <button type="button" title="Probar launcher" @click="launchAccessEntry(entry)">Abrir</button>
-            <button type="button" class="delete-key" :disabled="accessBusy" @click="removeAccessEntry(entry)">Eliminar</button>
           </div>
-          <small v-if="launcherEntries.length === 0">Aún no hay launchers configurados.</small>
-        </div>
-      </div>
-
-      <div class="access-settings">
-        <div class="settings-title access-heading">
-          <div><strong>Navegador de Asistente Modular</strong><small>Solo uno; sin configuración usa el predeterminado de Windows</small></div>
-          <span class="credential-state" :class="{ configured: browserConfigured }">{{ browserConfigured ? 'Configurado' : 'Predeterminado' }}</span>
-        </div>
-        <div class="access-form">
-          <input v-model="browserName" maxlength="80" placeholder="Nombre: Firefox" />
-          <input v-model="browserWord" maxlength="80" placeholder="Palabra: firefox" />
-          <div class="target-picker">
-            <input v-model="browserTarget" placeholder="Ruta del navegador .exe" />
-            <button type="button" @click="chooseApplicationTarget('browser')">Examinar</button>
-          </div>
-          <input class="access-wide" v-model="browserAliases" placeholder="Alias: fire fox, navegador" />
-          <div class="settings-buttons">
-            <button type="button" :disabled="webBusy || !browserName.trim() || !browserWord.trim() || !browserTarget.trim()" @click="storeBrowser">Guardar navegador</button>
-            <button type="button" class="delete-key" :disabled="webBusy || !browserConfigured" @click="useSystemBrowser">Usar Windows</button>
-          </div>
-        </div>
-
-        <div class="settings-title access-heading subsection-heading">
-          <div><strong>Accesos a páginas</strong><small>Nombre, enlace y palabras que Asistente Modular reconocerá</small></div>
-        </div>
-        <div class="access-form">
-          <input v-model="websiteName" maxlength="80" placeholder="Nombre: YouTube" />
-          <input v-model="websiteAliases" placeholder="Alias: you tube, videos" />
-          <input class="access-wide" v-model="websiteUrl" maxlength="2000" placeholder="https://www.youtube.com" />
-          <button type="button" :disabled="webBusy || !websiteName.trim() || !websiteUrl.trim()" @click="storeWebsite">Añadir página</button>
-        </div>
-        <div class="access-list">
-          <div v-for="site in websites" :key="site.id" class="access-entry website-entry">
-            <div>
-              <strong>{{ site.name }}</strong>
-              <small>{{ site.aliases.join(', ') || 'sin alias' }}</small>
-              <span :title="site.url">{{ site.url }}</span>
+          <div v-else-if="activeSettingsSection === 'model'" class="settings-section">
+            <section class="credential-module">
+              <div class="credential-module-heading">
+                <strong>Modelo de conversación</strong>
+                <small>Elige el proveedor y el modelo que usa el asistente para responder.</small>
+              </div>
+              <select v-model="llmConfig.provider" aria-label="Proveedor de conversación"><option value="gemini">Gemini</option><option value="ollama">Ollama local</option></select>
+              <input v-if="llmConfig.provider === 'gemini'" v-model="llmConfig.gemini_model" aria-label="Modelo Gemini" placeholder="Modelo Gemini" />
+              <input v-else v-model="llmConfig.ollama_model" aria-label="Modelo Ollama" placeholder="Modelo Ollama" />
+              <button type="button" :disabled="savingLLM" @click="updateLLM">{{ savingLLM ? 'Aplicando…' : 'Aplicar modelo' }}</button>
+              <small>{{ modelStatus }}</small>
+            </section>
+            <div v-if="!configured" class="notice">
+              Gemini aún no tiene una clave configurada. Puedes probar la conexión y añadirla después.
             </div>
-            <button type="button" class="delete-key" :disabled="webBusy" @click="removeWebsite(site)">Eliminar</button>
+            <div class="settings-title">
+              <div><strong>Claves API</strong><small>Se guardan de forma segura en el Administrador de credenciales de Windows</small></div>
+            </div>
+            <section class="credential-module">
+              <div class="credential-module-heading">
+                <strong>Claves API del agente</strong>
+                <small>Necesarias para conversar, usar la búsqueda web y la memoria semántica.</small>
+              </div>
+              <div v-for="provider in agentCredentialProviders" :key="provider.id" class="api-provider">
+                <div class="provider-name">
+                  <strong>{{ provider.name }}</strong>
+                  <small>{{ provider.detail }}</small>
+                </div>
+                <span class="credential-state" :class="{ configured: credentials[provider.id] }">
+                  {{ credentials[provider.id] ? 'Configurada' : 'Sin clave' }}
+                </span>
+                <input
+                  v-model="providerKeys[provider.id]"
+                  type="password"
+                  :placeholder="credentials[provider.id] ? 'Escribe otra clave para reemplazarla' : 'API key'"
+                  autocomplete="new-password"
+                />
+                <button
+                  type="button"
+                  :disabled="savingCredential !== null || providerKeys[provider.id].trim().length < 8"
+                  @click="storeProviderKey(provider.id)"
+                >{{ savingCredential === provider.id ? '…' : 'Guardar' }}</button>
+                <button
+                  type="button"
+                  class="delete-key"
+                  :disabled="savingCredential !== null || !credentials[provider.id]"
+                  title="Eliminar clave"
+                  @click="removeProviderKey(provider.id)"
+                >Eliminar</button>
+              </div>
+            </section>
           </div>
-          <small v-if="websites.length === 0">Aún no hay páginas configuradas.</small>
-        </div>
-      </div>
+          <div v-else-if="activeSettingsSection === 'voice'" class="settings-section">
+            <section class="credential-module microphone-settings">
+              <div class="credential-module-heading">
+                <strong>Micrófono</strong>
+                <small>Se usa al grabar y al escuchar en segundo plano.</small>
+              </div>
+              <label for="microphone-select">Dispositivo de entrada</label>
+              <select id="microphone-select" :value="selectedMicrophone" :disabled="recording || detectingMicrophones" @change="changeMicrophone">
+                <option value="">Predeterminado de Windows</option>
+                <option v-if="selectedMicrophoneMissing" :value="selectedMicrophone">Micrófono guardado (no disponible)</option>
+                <option v-for="(device, index) in microphones" :key="device.deviceId" :value="device.deviceId">
+                  {{ device.label || `Micrófono ${index + 1}` }}
+                </option>
+              </select>
+              <small v-if="selectedMicrophoneMissing">Se usará el predeterminado mientras el micrófono guardado no esté disponible.</small>
+              <button type="button" :disabled="recording || detectingMicrophones" @click="detectMicrophones">
+                {{ detectingMicrophones ? 'Detectando…' : 'Detectar micrófonos' }}
+              </button>
+              <small v-if="microphoneError" role="status">{{ microphoneError }}</small>
+            </section>
+            <div class="settings-title voice-heading">
+              <div><strong>Voz</strong><small>Motor, modelo y caché de las respuestas habladas</small></div>
+            </div>
+            <div class="voice-options">
+              <label><input v-model="voiceOutput" type="checkbox" /> Respuesta hablada</label>
+              <label><input v-model="useRvc" type="checkbox" /> Voz Miku (RVC)</label>
+              <select v-model="ttsEngine" aria-label="Motor de voz" @change="voiceMenuOpen = false">
+                <option value="edge">Edge TTS</option>
+                <option value="elevenlabs">ElevenLabs</option>
+                <option value="fish">Fish Audio</option>
+                <option value="custom">API personalizada</option>
+                <option value="kokoro">Kokoro local</option>
+              </select>
+              <div v-if="ttsEngine === 'edge'" class="voice-picker">
+                <button type="button" class="voice-picker-button" @click="voiceMenuOpen = !voiceMenuOpen">
+                  <span>{{ selectedVoiceLabel }}</span><b>⌄</b>
+                </button>
+                <div v-if="voiceMenuOpen" class="voice-menu">
+                  <input v-model="voiceSearch" type="search" placeholder="Buscar voz o país…" />
+                  <div class="voice-list">
+                    <button
+                      v-for="voice in filteredEdgeVoices"
+                      :key="voice.name"
+                      type="button"
+                      :class="{ selected: voice.name === edgeVoice }"
+                      @click="selectEdgeVoice(voice)"
+                    >
+                      <span>{{ voice.name.replace('Neural', '').split('-').at(-1) }}</span>
+                      <small>{{ voice.locale }} · {{ voice.gender === 'Female' ? 'Femenina' : 'Masculina' }}</small>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div v-if="ttsEngine === 'elevenlabs'" class="provider-settings">
+                <input v-model="elevenVoiceId" placeholder="Voice ID de ElevenLabs" />
+              </div>
+              <div v-if="ttsEngine === 'fish'" class="provider-settings">
+                <input v-model="fishReferenceId" placeholder="Reference ID de Fish Audio" />
+              </div>
+              <div v-if="ttsEngine === 'custom'" class="provider-settings custom-provider">
+                <input v-model="customEndpoint" placeholder="URL HTTPS del endpoint" />
+                <input v-model="customVoice" placeholder="Voz" />
+                <input v-model="customModel" placeholder="Modelo" />
+              </div>
+              <div class="cache-status">
+                <span>Caché: {{ cacheLabel }}</span>
+                <div>
+                  <button type="button" :disabled="savingPreferences" @click="storeVoicePreferences">
+                    {{ savingPreferences ? 'Guardando…' : 'Guardar ajustes' }}
+                  </button>
+                  <button type="button" @click="emptyVoiceCache">Vaciar caché</button>
+                </div>
+              </div>
+            </div>
+            <section class="credential-module">
+              <div class="credential-module-heading">
+                <strong>Claves API de voz</strong>
+                <small>Solo necesitas configurar el proveedor de voz que elijas.</small>
+              </div>
+              <div v-for="provider in voiceCredentialProviders" :key="provider.id" class="api-provider">
+                <div class="provider-name">
+                  <strong>{{ provider.name }}</strong>
+                  <small>{{ provider.detail }}</small>
+                </div>
+                <span class="credential-state" :class="{ configured: credentials[provider.id] }">
+                  {{ credentials[provider.id] ? 'Configurada' : 'Sin clave' }}
+                </span>
+                <input
+                  v-model="providerKeys[provider.id]"
+                  type="password"
+                  :placeholder="credentials[provider.id] ? 'Escribe otra clave para reemplazarla' : 'API key'"
+                  autocomplete="new-password"
+                />
+                <button
+                  type="button"
+                  :disabled="savingCredential !== null || providerKeys[provider.id].trim().length < 8"
+                  @click="storeProviderKey(provider.id)"
+                >{{ savingCredential === provider.id ? '…' : 'Guardar' }}</button>
+                <button
+                  type="button"
+                  class="delete-key"
+                  :disabled="savingCredential !== null || !credentials[provider.id]"
+                  title="Eliminar clave"
+                  @click="removeProviderKey(provider.id)"
+                >Eliminar</button>
+              </div>
+            </section>
+          </div>
+          <div v-else-if="activeSettingsSection === 'apps'" class="settings-section">
+            <div class="access-settings">
+              <div class="settings-title access-heading">
+                <div><strong>Accesos permitidos</strong><small>Aplicaciones, archivos y carpetas que el asistente puede abrir</small></div>
+              </div>
+              <button class="detect-apps" type="button" :disabled="syncingApps" @click="detectApps">{{ syncingApps ? 'Buscando…' : 'Detectar aplicaciones instaladas' }}</button>
+              <div class="access-form">
+                <input v-model="accessName" maxlength="80" placeholder="Nombre, por ejemplo: Steam" />
+                <select v-model="accessKind">
+                  <option value="application">Aplicación</option>
+                  <option value="file">Archivo</option>
+                  <option value="folder">Carpeta</option>
+                </select>
+                <div class="target-picker">
+                  <input v-model="accessTarget" :placeholder="accessTargetPlaceholder" />
+                  <button type="button" @click="chooseAccessTarget">Examinar</button>
+                </div>
+                <input class="access-wide" v-model="accessAliases" placeholder="Alias separados por comas: steam, juegos" />
+                <input class="access-wide" v-model="accessSpokenName" placeholder="Nombre pronunciado (opcional)" />
+                <button
+                  type="button"
+                  :disabled="accessBusy || !accessName.trim() || !accessTarget.trim()"
+                  @click="storeAccessEntry"
+                >Añadir acceso</button>
+              </div>
+              <div class="access-list">
+                <div v-for="entry in regularAccessEntries" :key="entry.id" class="access-entry">
+                  <div>
+                    <strong>{{ entry.name }}</strong>
+                    <small>{{ entry.kind }} · {{ entry.aliases.join(', ') || 'sin alias' }}</small>
+                    <span :title="entry.target">{{ entry.target }}</span>
+                    <div class="spoken-name-editor">
+                      <input v-model="entry.spoken_name" maxlength="120" aria-label="Nombre pronunciado" />
+                      <button type="button" :disabled="accessBusy || !entry.spoken_name.trim()" @click="storeAccessSpokenName(entry)">Voz</button>
+                    </div>
+                  </div>
+                  <button type="button" title="Probar acceso" @click="launchAccessEntry(entry)">Abrir</button>
+                  <button type="button" class="delete-key" :disabled="accessBusy" @click="removeAccessEntry(entry)">Eliminar</button>
+                </div>
+                <small v-if="regularAccessEntries.length === 0">Aún no hay accesos configurados.</small>
+              </div>
+            </div>
 
-      <div v-if="!configured" class="notice">
-        Gemini aún no tiene una clave configurada. Puedes probar la conexión y añadirla después.
-      </div>
+            <div class="access-settings">
+              <div class="settings-title access-heading">
+                <div><strong>Launchers de juegos</strong><small>Al decir “cierra”, Asistente Modular cierra la ventana sin matar el proceso</small></div>
+              </div>
+              <div class="access-form">
+                <input v-model="launcherName" maxlength="80" placeholder="Nombre, por ejemplo: Steam" />
+                <input v-model="launcherAliases" placeholder="Alias: steam, vapor" />
+                <div class="target-picker">
+                  <input v-model="launcherTarget" placeholder="Ruta del launcher .exe o .lnk" />
+                  <button type="button" @click="chooseApplicationTarget('launcher')">Examinar</button>
+                </div>
+                <button type="button" :disabled="accessBusy || !launcherName.trim() || !launcherTarget.trim()" @click="storeLauncher">Añadir launcher</button>
+              </div>
+              <div class="access-list">
+                <div v-for="entry in launcherEntries" :key="entry.id" class="access-entry">
+                  <div>
+                    <strong>{{ entry.name }}</strong>
+                    <small>cierre de ventana · {{ entry.aliases.join(', ') || 'sin alias' }}</small>
+                    <span :title="entry.target">{{ entry.target }}</span>
+                  </div>
+                  <button type="button" title="Probar launcher" @click="launchAccessEntry(entry)">Abrir</button>
+                  <button type="button" class="delete-key" :disabled="accessBusy" @click="removeAccessEntry(entry)">Eliminar</button>
+                </div>
+                <small v-if="launcherEntries.length === 0">Aún no hay launchers configurados.</small>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="activeSettingsSection === 'files'" class="settings-section">
+            <div class="access-settings file-access-settings">
+              <div class="settings-title access-heading">
+                <div><strong>Lectura de archivos</strong><small>Autoriza las carpetas donde el asistente puede buscar archivos por nombre. Las extensiones de abajo se aplican a la lectura del contenido.</small></div>
+              </div>
+              <small class="file-reading-help">Puedes buscar, crear TXT, CSV, Word, Excel, PowerPoint y PDF; copiar, mover y renombrar. Las modificaciones requieren confirmación.</small>
+              <div class="target-picker">
+                <input v-model="fileAccessFolderDraft" placeholder="Carpeta autorizada para lectura" />
+                <button type="button" @click="chooseFileAccessFolder">Examinar</button>
+              </div>
+              <button class="add-file-folder" type="button" :disabled="!fileAccessFolderDraft.trim()" @click="addFileAccessFolder">Añadir carpeta</button>
+              <div class="file-folder-list">
+                <div v-for="folder in fileAccessPreferences.folders" :key="folder" class="file-folder-entry">
+                  <span :title="folder">{{ folder }}</span>
+                  <button type="button" class="delete-key" :disabled="savingFileAccess" @click="removeFileAccessFolder(folder)">Quitar</button>
+                </div>
+                <small v-if="fileAccessPreferences.folders.length === 0">No hay carpetas autorizadas: Asistente Modular no puede leer ningún archivo todavía.</small>
+              </div>
+              <label class="file-extensions">
+                Tipos permitidos
+                <input v-model="fileAccessExtensionsDraft" maxlength="300" placeholder="txt, md, csv, json, docx" />
+                <small>Escribe extensiones separadas por comas, sin punto. Disponibles: txt, md, csv, json y docx.</small>
+              </label>
+              <button type="button" :disabled="savingFileAccess" @click="storeFileAccessPreferences">
+                {{ savingFileAccess ? 'Guardando…' : 'Guardar permisos de archivos' }}
+              </button>
+              <div class="file-index-heading">
+                <div><strong>Índice local</strong><small>{{ indexedFiles.length }} archivos autorizados por nombre.</small></div>
+                <button type="button" :disabled="refreshingFileIndex || savingFileAccess" @click="updateFileIndex">{{ refreshingFileIndex ? 'Actualizando…' : 'Actualizar archivos' }}</button>
+              </div>
+              <div v-if="indexedFiles.length" class="indexed-file-list">
+                <span v-for="file in indexedFiles.slice(0, 8)" :key="file.path" :title="file.path">{{ file.name }}</span>
+                <small v-if="indexedFiles.length > 8">y {{ indexedFiles.length - 8 }} más</small>
+              </div>
+              <small class="file-reading-help">Luego puedes decir “Resume el informe de robótica” sin escribir la ruta. Actualiza el índice si agregas, renombras o eliminas archivos.</small>
+            </div>
+          </div>
+          <div v-else-if="activeSettingsSection === 'web'" class="settings-section">
+            <div class="access-settings">
+              <div class="settings-title access-heading">
+                <div><strong>Navegador de Asistente Modular</strong><small>Solo uno; sin configuración usa el predeterminado de Windows</small></div>
+                <span class="credential-state" :class="{ configured: browserConfigured }">{{ browserConfigured ? 'Configurado' : 'Predeterminado' }}</span>
+              </div>
+              <div class="access-form">
+                <input v-model="browserName" maxlength="80" placeholder="Nombre: Firefox" />
+                <input v-model="browserWord" maxlength="80" placeholder="Palabra: firefox" />
+                <div class="target-picker">
+                  <input v-model="browserTarget" placeholder="Ruta del navegador .exe" />
+                  <button type="button" @click="chooseApplicationTarget('browser')">Examinar</button>
+                </div>
+                <input class="access-wide" v-model="browserAliases" placeholder="Alias: fire fox, navegador" />
+                <div class="settings-buttons">
+                  <button type="button" :disabled="webBusy || !browserName.trim() || !browserWord.trim() || !browserTarget.trim()" @click="storeBrowser">Guardar navegador</button>
+                  <button type="button" class="delete-key" :disabled="webBusy || !browserConfigured" @click="useSystemBrowser">Usar Windows</button>
+                </div>
+              </div>
 
-      <div class="access-settings">
-        <div class="settings-title access-heading"><div><strong>Memoria de {{ assistantName }}</strong><small>También puedes decir “recuerda que…”</small></div></div>
-        <div class="access-form">
-          <input class="access-wide" v-model="memoryDraft" maxlength="1000" placeholder="Ejemplo: mi color favorito es el azul" @keyup.enter="storeMemory" />
-          <button type="button" :disabled="memoryBusy || !memoryDraft.trim()" @click="storeMemory">Recordar</button>
-        </div>
-        <div class="access-list">
-          <div v-for="memory in memories" :key="memory.id" class="access-entry memory-entry"><div><strong>{{ memory.content }}</strong><small>{{ new Date(memory.created_at).toLocaleString() }}</small></div><button type="button" class="delete-key" :disabled="memoryBusy" @click="removeMemory(memory)">Olvidar</button></div>
-          <small v-if="memories.length === 0">Aún no hay recuerdos guardados.</small>
-        </div>
-      </div>
+              <div class="settings-title access-heading subsection-heading">
+                <div><strong>Accesos a páginas</strong><small>Atajos opcionales para abrir una dirección concreta con «Entra a…».</small></div>
+              </div>
+              <div class="access-form">
+                <input v-model="websiteName" maxlength="80" placeholder="Nombre: YouTube" />
+                <input v-model="websiteAliases" placeholder="Alias: you tube, videos" />
+                <input class="access-wide" v-model="websiteUrl" maxlength="2000" placeholder="https://www.youtube.com" />
+                <button type="button" :disabled="webBusy || !websiteName.trim() || !websiteUrl.trim()" @click="storeWebsite">Añadir página</button>
+              </div>
+              <div class="access-list">
+                <div v-for="site in websites" :key="site.id" class="access-entry website-entry">
+                  <div>
+                    <strong>{{ site.name }}</strong>
+                    <small>{{ site.aliases.join(', ') || 'sin alias' }}</small>
+                    <span :title="site.url">{{ site.url }}</span>
+                  </div>
+                  <button type="button" class="delete-key" :disabled="webBusy" @click="removeWebsite(site)">Eliminar</button>
+                </div>
+                <small v-if="websites.length === 0">Aún no hay páginas configuradas.</small>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="activeSettingsSection === 'memory'" class="settings-section">
+            <MemoryPanel :assistant-name="assistantName" :memories="memories" :memory-busy="memoryBusy" v-model:memoryDraft="memoryDraft" @storeMemory="storeMemory" @removeMemory="removeMemory" />
 
-      <div class="access-settings">
-        <div class="settings-title access-heading"><div><strong>Recordatorios</strong><small>Se ejecutan localmente sin Gemini.</small></div></div>
-        <div class="access-form">
-          <input v-model="reminderTitle" maxlength="300" placeholder="Qué recordar o hacer" />
-          <input v-model="reminderAt" type="datetime-local" />
-          <select v-model="reminderAction"><option value="notify">Avisar</option><option value="open_access">Abrir acceso</option></select>
-          <select v-if="reminderAction === 'open_access'" v-model="reminderAccessId"><option value="">Selecciona un acceso</option><option v-for="entry in accessEntries" :key="entry.id" :value="entry.id">{{ entry.name }}</option></select>
-          <button type="button" :disabled="scheduleBusy || !reminderTitle.trim() || !reminderAt || (reminderAction === 'open_access' && !reminderAccessId)" @click="storeReminder">Crear recordatorio</button>
-        </div>
-        <div class="access-list">
-          <div v-for="reminder in reminders.filter((item) => item.status === 'pending')" :key="reminder.id" class="access-entry"><div><strong>{{ reminder.title }}</strong><small>{{ new Date(reminder.due_at).toLocaleString() }} · {{ reminder.action_type === 'open_access' ? 'abre un acceso' : 'aviso' }}</small></div><button type="button" class="delete-key" :disabled="scheduleBusy" @click="removeReminder(reminder)">Eliminar</button></div>
-          <small v-if="!reminders.some((item) => item.status === 'pending')">No hay recordatorios pendientes.</small>
-        </div>
-      </div>
-
-      <div class="access-settings">
-        <div class="settings-title access-heading"><div><strong>Rutinas</strong><small>Abren los accesos elegidos en los días y hora indicados.</small></div></div>
-        <div class="access-form">
-          <input v-model="routineName" maxlength="100" placeholder="Nombre: Inicio de trabajo" />
-          <input v-model="routineTime" type="time" />
-          <select v-model="routineAccessIds" multiple size="4" class="access-wide" aria-label="Accesos de rutina"><option v-for="entry in accessEntries" :key="entry.id" :value="entry.id">{{ entry.name }}</option></select>
-          <div class="routine-days access-wide"><button v-for="(name, day) in ['L','M','X','J','V','S','D']" :key="name" type="button" :class="{ selected: routineDays.includes(day) }" @click="toggleRoutineDay(day)">{{ name }}</button></div>
-          <button type="button" :disabled="scheduleBusy || !routineName.trim() || !routineAccessIds.length || !routineDays.length" @click="storeRoutine">Crear rutina</button>
-        </div>
-        <div class="access-list">
-          <div v-for="routine in routines" :key="routine.id" class="access-entry"><div><strong>{{ routine.name }}</strong><small>{{ routine.time_of_day }} · días {{ routine.days.map((day) => ['L','M','X','J','V','S','D'][day]).join(', ') }}</small></div><button type="button" class="delete-key" :disabled="scheduleBusy" @click="removeRoutine(routine)">Eliminar</button></div>
-          <small v-if="routines.length === 0">Aún no hay rutinas configuradas.</small>
-        </div>
-      </div>
-
-      <div class="settings-title voice-heading">
-        <div><strong>Voz</strong><small>Motor, modelo y caché de las respuestas habladas</small></div>
-      </div>
-      <div class="voice-options">
-      <label><input v-model="voiceOutput" type="checkbox" /> Respuesta hablada</label>
-      <label><input v-model="useRvc" type="checkbox" /> Voz Miku (RVC)</label>
-      <select v-model="ttsEngine" aria-label="Motor de voz" @change="voiceMenuOpen = false">
-        <option value="edge">Edge TTS</option>
-        <option value="elevenlabs">ElevenLabs</option>
-        <option value="fish">Fish Audio</option>
-        <option value="custom">API personalizada</option>
-        <option value="kokoro">Kokoro local</option>
-      </select>
-      <div v-if="ttsEngine === 'edge'" class="voice-picker">
-        <button type="button" class="voice-picker-button" @click="voiceMenuOpen = !voiceMenuOpen">
-          <span>{{ selectedVoiceLabel }}</span><b>⌄</b>
-        </button>
-        <div v-if="voiceMenuOpen" class="voice-menu">
-          <input v-model="voiceSearch" type="search" placeholder="Buscar voz o país…" />
-          <div class="voice-list">
-            <button
-              v-for="voice in filteredEdgeVoices"
-              :key="voice.name"
-              type="button"
-              :class="{ selected: voice.name === edgeVoice }"
-              @click="selectEdgeVoice(voice)"
-            >
-              <span>{{ voice.name.replace('Neural', '').split('-').at(-1) }}</span>
-              <small>{{ voice.locale }} · {{ voice.gender === 'Female' ? 'Femenina' : 'Masculina' }}</small>
-            </button>
+            <SchedulePanel :access-entries="accessEntries" :reminders="reminders" :routines="routines" :schedule-busy="scheduleBusy" v-model:reminderTitle="reminderTitle" v-model:reminderAt="reminderAt" v-model:reminderAction="reminderAction" v-model:reminderAccessId="reminderAccessId" v-model:routineName="routineName" v-model:routineTime="routineTime" v-model:routineAccessIds="routineAccessIds" v-model:routineDays="routineDays" @storeReminder="storeReminder" @removeReminder="removeReminder" @toggleRoutineDay="toggleRoutineDay" @storeRoutine="storeRoutine" @removeRoutine="removeRoutine" />
+          </div>
+          <div v-else-if="activeSettingsSection === 'activity'" class="settings-section">
+            <div class="settings-title history-heading">
+              <div><strong>Actividad reciente</strong><small>Mensajes y consumo de la sesión actual</small></div>
+            </div>
+            <ConversationList class="settings-conversation" :messages="messages" />
           </div>
         </div>
       </div>
-      <div v-if="ttsEngine === 'elevenlabs'" class="provider-settings">
-        <input v-model="elevenVoiceId" placeholder="Voice ID de ElevenLabs" />
-      </div>
-      <div v-if="ttsEngine === 'fish'" class="provider-settings">
-        <input v-model="fishReferenceId" placeholder="Reference ID de Fish Audio" />
-      </div>
-      <div v-if="ttsEngine === 'custom'" class="provider-settings custom-provider">
-        <input v-model="customEndpoint" placeholder="URL HTTPS del endpoint" />
-        <input v-model="customVoice" placeholder="Voz" />
-        <input v-model="customModel" placeholder="Modelo" />
-      </div>
-      <div class="cache-status">
-        <span>Caché: {{ cacheLabel }}</span>
-        <div>
-          <button type="button" :disabled="savingPreferences" @click="storeVoicePreferences">
-            {{ savingPreferences ? 'Guardando…' : 'Guardar ajustes' }}
-          </button>
-          <button type="button" @click="emptyVoiceCache">Vaciar caché</button>
-        </div>
-      </div>
-      </div>
-
-      <div class="settings-title history-heading">
-        <div><strong>Actividad reciente</strong><small>Mensajes y consumo de la sesión actual</small></div>
-      </div>
-      <section class="conversation settings-conversation">
-        <article v-for="message in messages" :key="message.id" :class="message.role">
-          <span>{{ message.text }}</span>
-          <small v-if="message.usage && message.usage.total > 0">
-            {{ message.usage.total }} tokens · {{ message.usage.input }} entrada ·
-            {{ message.usage.output }} salida<span v-if="message.usage.thinking > 0">
-              · {{ message.usage.thinking }} razonamiento</span> · sesión {{ message.usage.session }}
-          </small>
-        </article>
-      </section>
     </section>
 
     <form @submit.prevent="send">
@@ -1566,137 +1564,4 @@ onBeforeUnmount(() => {
   </main>
 </template>
 
-<style>
-:root { color-scheme: dark; font-family: Inter, Segoe UI, sans-serif; background: transparent; color: #eef2ff; }
-* { box-sizing: border-box; }
-html, body, #app { background: transparent; }
-body { margin: 0; min-width: 320px; min-height: 100vh; overflow: hidden; }
-button, input { font: inherit; }
-.shell { position: relative; height: 100vh; display: flex; flex-direction: column; gap: 6px; padding: 6px; overflow: hidden; background: transparent; }
-.avatar-stage { position: relative; min-height: 0; flex: 1; overflow: hidden; -webkit-app-region: drag; }
-.settings-panel { position: absolute; z-index: 20; inset: 12px; overflow-y: auto; padding: 15px; border: 1px solid #ffffff24; border-radius: 20px; background: #11172af7; box-shadow: 0 18px 55px #000a; backdrop-filter: blur(18px); }
-.settings-panel-header { position: sticky; z-index: 8; top: -15px; display: flex; align-items: flex-start; justify-content: space-between; margin: -15px -15px 12px; padding: 15px; border-bottom: 1px solid #ffffff17; background: #11172af2; backdrop-filter: blur(18px); }
-.settings-panel-header > div:first-child { display: flex; flex-direction: column; gap: 3px; }
-.settings-panel-header small { color: #7f89aa; font-size: .68rem; }
-.settings-panel-header button { width: 32px; height: 32px; border: 0; border-radius: 9px; color: #cbd5e1; background: #ffffff0d; font-size: 1.2rem; cursor: pointer; }
-.settings-panel-actions { display: flex; gap: 6px; }
-.assistant-name-setting { display: flex; flex-direction: column; gap: 8px; padding-bottom: 12px; }
-.assistant-name-setting > div:first-child { display: flex; flex-direction: column; gap: 3px; }
-.assistant-name-setting small { color: #7f89aa; font-size: .68rem; }
-.assistant-name-setting > div:last-child { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
-.assistant-name-setting input { padding: 7px 9px; border: 1px solid #ffffff17; border-radius: 8px; color: #dbe2ff; background: #090e1c; }
-.assistant-name-setting button { padding: 6px 10px; border: 0; border-radius: 8px; color: white; background: #6d63df; cursor: pointer; }
-.assistant-name-setting button:disabled { opacity: .35; cursor: default; }
-.activation-settings { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-top: 1px solid #ffffff1f; }
-.activation-settings > div { display: flex; flex-direction: column; gap: 3px; }
-.activation-settings small { color: #7f89aa; font-size: .68rem; }
-.activation-settings label { display: flex; align-items: center; gap: 7px; color: #cbd5e1; font-size: .76rem; }
-.activation-settings input[type='number'] { width: 82px; padding: 6px 8px; border: 1px solid #ffffff17; border-radius: 8px; background: #090e1c; }
-.activation-settings button { padding: 7px 10px; border: 0; border-radius: 8px; color: white; background: #6d63df; cursor: pointer; }
-.settings-title { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 10px; }
-.settings-title > div { display: flex; flex-direction: column; gap: 3px; }
-.settings-title small, .provider-name small { color: #7f89aa; font-size: .68rem; }
-.settings-title button { border: 0; color: #aab3d5; background: transparent; font-size: 1.25rem; cursor: pointer; }
-.credential-module { display: flex; flex-direction: column; gap: 2px; padding: 12px 0; border-top: 1px solid #ffffff1f; }
-.credential-module-heading { display: flex; flex-direction: column; gap: 3px; padding-bottom: 4px; }
-.credential-module-heading strong { color: #dbe2ff; font-size: .82rem; }
-.credential-module-heading small { color: #7f89aa; font-size: .68rem; line-height: 1.35; }
-.api-provider { display: grid; grid-template-columns: minmax(110px, .8fr) auto; gap: 7px 10px; padding: 10px 0; border-top: 1px solid #ffffff0d; }
-.provider-name { display: flex; flex-direction: column; gap: 2px; font-size: .8rem; }
-.credential-state { align-self: center; color: #fbbf24; font-size: .68rem; }
-.credential-state.configured { color: #52e0a1; }
-.api-provider input { grid-column: 1 / -1; padding: 7px 9px; border: 1px solid #ffffff17; border-radius: 8px; color: #dbe2ff; background: #090e1c; }
-.api-provider button { padding: 6px 9px; border: 0; border-radius: 8px; color: white; background: #6d63df; cursor: pointer; }
-.api-provider button.delete-key { color: #fda4af; background: #ffffff0d; }
-.api-provider button:disabled { opacity: .35; cursor: default; }
-.access-settings { margin-top: 14px; padding-top: 12px; border-top: 1px solid #ffffff1f; }
-.access-heading { margin-bottom: 8px; }
-.file-access-settings { display: flex; flex-direction: column; gap: 8px; }
-.add-file-folder { align-self: flex-start; padding: 6px 9px; border: 0; border-radius: 8px; color: white; background: #6d63df; cursor: pointer; }
-.add-file-folder:disabled { opacity: .35; cursor: default; }
-.file-folder-list { display: flex; flex-direction: column; gap: 6px; }
-.file-folder-list > small, .file-reading-help, .file-extensions small { color: #7f89aa; font-size: .68rem; line-height: 1.4; }
-.file-folder-entry { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 7px 9px; border: 1px solid #ffffff12; border-radius: 8px; background: #090e1c; }
-.file-folder-entry span { overflow: hidden; color: #cbd5e1; font-size: .72rem; text-overflow: ellipsis; white-space: nowrap; }
-.file-folder-entry button { padding: 4px 7px; border: 0; border-radius: 7px; color: #fda4af; background: #ffffff0d; cursor: pointer; font-size: .68rem; }
-.file-extensions { display: flex; flex-direction: column; gap: 4px; color: #cbd5e1; font-size: .76rem; }
-.file-extensions input { padding: 7px 9px; border: 1px solid #ffffff17; border-radius: 8px; color: #dbe2ff; background: #090e1c; }
-.file-access-settings > button:last-of-type { padding: 7px 10px; border: 0; border-radius: 8px; color: white; background: #6d63df; cursor: pointer; }
-.file-access-settings > button:last-of-type:disabled { opacity: .35; cursor: default; }
-.file-index-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 3px; }
-.file-index-heading > div { display: flex; flex-direction: column; gap: 2px; }
-.file-index-heading strong { color: #dbe2ff; font-size: .76rem; }
-.file-index-heading small { color: #7f89aa; font-size: .67rem; }
-.file-index-heading button { padding: 5px 8px; border: 0; border-radius: 7px; color: #cbd5e1; background: #ffffff0d; cursor: pointer; font-size: .68rem; }
-.file-index-heading button:disabled { opacity: .35; cursor: default; }
-.indexed-file-list { display: flex; flex-wrap: wrap; gap: 5px; }
-.indexed-file-list span { max-width: 100%; overflow: hidden; padding: 4px 7px; border-radius: 999px; color: #b9c3e6; background: #ffffff0d; font-size: .66rem; text-overflow: ellipsis; white-space: nowrap; }
-.indexed-file-list small { align-self: center; color: #7f89aa; font-size: .66rem; }
-.access-form { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
-.access-form input, .access-form select { padding: 7px 9px; border: 1px solid #ffffff17; border-radius: 8px; color: #dbe2ff; background: #090e1c; }
-.target-picker { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr auto; gap: 7px; }
-.target-picker input { overflow: hidden; text-overflow: ellipsis; }
-.access-form > .access-wide { grid-column: 1 / -1; }
-.access-form button, .access-entry button { padding: 6px 9px; border: 0; border-radius: 8px; color: white; background: #6d63df; cursor: pointer; }
-.access-form > button { grid-column: 1 / -1; }
-.settings-buttons { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
-.subsection-heading { margin-top: 16px; padding-top: 12px; border-top: 1px solid #ffffff0d; }
-.website-entry { grid-template-columns: 1fr auto; }
-.access-form button:disabled, .access-entry button:disabled { opacity: .35; cursor: default; }
-.access-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
-.access-list > small { color: #7f89aa; }
-.access-entry { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 6px; padding: 8px; border-radius: 9px; background: #090e1c; }
-.access-entry > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.access-entry strong { font-size: .76rem; }
-.access-entry small { color: #8791b4; font-size: .65rem; }
-.access-entry span { overflow: hidden; color: #687290; font-size: .61rem; text-overflow: ellipsis; white-space: nowrap; }
-.access-entry .spoken-name-editor { display: grid; grid-template-columns: 1fr auto; gap: 5px; margin-top: 4px; }
-.spoken-name-editor input { padding: 5px 7px; border: 1px solid #ffffff17; border-radius: 7px; color: #dbe2ff; background: #11172a; font-size: .68rem; }
-.spoken-name-editor button { padding: 4px 7px; font-size: .67rem; }
-.access-entry button.delete-key { color: #fda4af; background: #ffffff0d; }
-.memory-entry { grid-template-columns: 1fr auto; }
-.routine-days { display: flex; gap: 5px; }
-.routine-days button { flex: 1; padding: 6px 0; color: #aab3d5; background: #ffffff0d; }
-.routine-days button.selected { color: white; background: #6d63df; }
-.notice { padding: 11px 13px; border: 1px solid #fbbf2440; border-radius: 12px; background: #fbbf2410; color: #fde68a; font-size: .82rem; }
-.conversation { min-height: 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
-.main-conversation { flex: 0 1 190px; max-height: 190px; padding: 10px; border: 1px solid #ffffff1a; border-radius: 15px; background: #0b1024d9; box-shadow: 0 10px 30px #0005; -webkit-app-region: no-drag; }
-.settings-conversation { max-height: 260px; padding: 8px; border: 1px solid #ffffff0d; border-radius: 12px; background: #090e1c80; }
-.voice-heading, .history-heading { margin-top: 16px; padding-top: 14px; border-top: 1px solid #ffffff1f; }
-article { max-width: 86%; padding: 11px 13px; border-radius: 15px; line-height: 1.42; font-size: .93rem; }
-article span { display: block; }
-article small { display: block; margin-top: 8px; padding-top: 7px; border-top: 1px solid #ffffff12; color: #aab3d5; font-size: .69rem; line-height: 1.3; }
-.conversation article small span { display: inline; }
-article.assistant { align-self: flex-start; background: #171e35; border-bottom-left-radius: 5px; }
-article.user { align-self: flex-end; background: #5c55c7; border-bottom-right-radius: 5px; }
-article.system { align-self: center; color: #aab3d5; font-size: .8rem; background: transparent; }
-.voice-options { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 9px 16px; color: #aab3d5; font-size: .76rem; z-index: 5; }
-.voice-options label { display: flex; align-items: center; gap: 5px; }
-.voice-options input { accent-color: #7c70ee; }
-.voice-options select { max-width: 150px; padding: 5px 7px; border: 1px solid #ffffff17; border-radius: 8px; color: #dbe2ff; background: #11172a; }
-.voice-picker { position: relative; min-width: 150px; }
-.voice-picker-button { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 6px 9px; border: 1px solid #ffffff17; border-radius: 8px; color: #dbe2ff; background: #11172a; cursor: pointer; }
-.voice-picker-button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.voice-menu { position: absolute; top: calc(100% + 6px); right: 0; width: 255px; padding: 8px; border: 1px solid #ffffff1f; border-radius: 12px; background: #11172a; box-shadow: 0 14px 40px #0008; }
-.voice-menu > input { width: 100%; padding: 8px 9px; border: 1px solid #ffffff17; border-radius: 8px; background: #090e1c; }
-.voice-list { max-height: 190px; overflow-y: auto; margin-top: 7px; }
-.voice-list button { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 8px; border: 0; border-radius: 7px; color: #dbe2ff; background: transparent; cursor: pointer; text-align: left; }
-.voice-list button:hover, .voice-list button.selected { background: #6d63df33; }
-.voice-list button small { color: #8791b4; font-size: .67rem; }
-.provider-settings, .cache-status { display: flex; align-items: center; gap: 7px; width: 100%; }
-.provider-settings input { flex: 1; min-width: 100px; padding: 6px 8px; border: 1px solid #ffffff17; border-radius: 8px; color: #dbe2ff; background: #11172a; }
-.custom-provider { flex-wrap: wrap; }
-.cache-status button { padding: 6px 9px; border: 0; border-radius: 8px; color: white; background: #6d63df; cursor: pointer; }
-.cache-status { justify-content: space-between; color: #7f89aa; font-size: .68rem; }
-.cache-status > div { display: flex; gap: 6px; }
-.cache-status button { padding: 4px 7px; background: #ffffff0d; color: #aab3d5; }
-form, .settings-panel { -webkit-app-region: no-drag; }
-form { display: grid; grid-template-columns: auto 1fr auto; gap: 9px; padding: 8px; border: 1px solid #ffffff24; background: #11172ae8; border-radius: 16px; box-shadow: 0 10px 28px #0006; backdrop-filter: blur(14px); }
-input { min-width: 0; border: 0; outline: 0; color: inherit; background: transparent; padding: 8px; }
-form button { width: 39px; height: 39px; border: 0; border-radius: 12px; color: white; cursor: pointer; }
-form .send { background: #6d63df; }
-form .microphone { color: #fda4af; background: #ffffff0d; font-size: .72rem; }
-form .microphone.recording { color: white; background: #e04f70; animation: pulse 1s infinite; }
-form button:disabled { opacity: .35; cursor: default; }
-@keyframes pulse { 50% { opacity: .55; transform: scale(.96); } }
-</style>
+<style src="./styles/app.css"></style>

@@ -14,7 +14,7 @@ class GeminiEmbeddingProvider:
     def embed(self, text: str, task_type: Literal["RETRIEVAL_DOCUMENT", "RETRIEVAL_QUERY"]) -> list[float]:
         from google import genai
         from google.genai import types
-        client = genai.Client(api_key=self.api_key)
+        client = genai.Client(api_key=self.api_key, http_options=types.HttpOptions(timeout=15000))
         response = client.models.embed_content(
             model=self.model,
             contents=text,
