@@ -10,6 +10,7 @@ from asistente.config.settings import ConversationPreferenceStore, FileAccessPre
 from asistente.core.orchestrator import Orchestrator
 from asistente.providers.gemini import GeminiProvider
 from asistente.providers.ollama import OllamaProvider
+from asistente.providers.llama_cpp import LlamaCppProvider
 from asistente.config.settings import LLMPreferenceStore
 from asistente.tools.registry import AccessToolService
 from asistente.tools.files import FileAccessService
@@ -62,6 +63,8 @@ def create_http_router(
             memory_store.embeddings = GeminiEmbeddingProvider(key) if key and config["provider"] == "gemini" else None
         if config["provider"] == "ollama":
             orchestrator.provider = OllamaProvider(config["ollama_model"])
+        elif config["provider"] == "llama_cpp":
+            orchestrator.provider = LlamaCppProvider(config["llama_cpp_model"])
         else:
             orchestrator.provider = GeminiProvider(key, config["gemini_model"], bool(conversation_preferences.get()["web_search_enabled"]) if conversation_preferences else True) if key else None
 

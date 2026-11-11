@@ -31,9 +31,10 @@ class VoicePreferencesRequest(BaseModel):
 
 
 class LLMConfigRequest(BaseModel):
-    provider: Literal["gemini", "ollama"]
+    provider: Literal["gemini", "ollama", "llama_cpp"]
     gemini_model: str = Field(min_length=1, max_length=150)
     ollama_model: str = Field(min_length=1, max_length=150)
+    llama_cpp_model: str = Field(default="local-model", min_length=1, max_length=150)
 
 
 class ConversationPreferencesRequest(BaseModel):

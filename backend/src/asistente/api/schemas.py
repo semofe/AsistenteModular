@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 class ClientMessage(BaseModel):
     version: Literal[1] = 1
-    type: Literal["user_text", "clear_conversation", "ping"]
+    type: Literal["user_text", "cancel_response", "clear_conversation", "ping"]
     request_id: str = Field(default_factory=lambda: str(uuid4()))
     payload: dict[str, Any] = Field(default_factory=dict)
 
@@ -19,7 +19,7 @@ class ClientMessage(BaseModel):
 class ServerMessage(BaseModel):
     version: Literal[1] = 1
     type: Literal[
-        "assistant_state", "assistant_text", "conversation_cleared", "pong", "error"
+        "assistant_state", "assistant_text", "response_cancelled", "conversation_cleared", "pong", "error"
     ]
     request_id: str | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

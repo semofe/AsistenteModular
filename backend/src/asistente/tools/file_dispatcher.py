@@ -50,22 +50,30 @@ class FileToolService:
 
     @staticmethod
     def is_request(text: str) -> bool:
-        return bool(re.search(r"\b(busca|buscar|encuentra|localiza|crea|crear|genera|generar|redacta|copia|copiar|mueve|mover|renombra|renombrar)\b", text, re.I))
+        explicit_action = r"\b(busca|buscar|encuentra|localiza|crea|crear|genera|generar|redacta|copia|copiar|mueve|mover|renombra|renombrar)\b"
+        requested_artifact = r"\b(dame|hazme|prepara|preparame|elabora|elaborame)\b.*\b(archivo|excel|xlsx|documento|word|docx|pdf|presentacion|presentación|powerpoint|pptx)\b"
+        informational_request = r"\b(dame|hazme|prepara|preparame|elabora|elaborame)\s+(informacion|información|info|ayuda|detalles)\b"
+        return bool(
+            re.search(explicit_action, text, re.I)
+            or (re.search(requested_artifact, text, re.I) and not re.search(informational_request, text, re.I))
+        )
 
     async def confirm(self, text: str) -> str | None:
         if self.pending is None:
             return None
         call, expires = self.pending
         self.awaiting_details = False
-        self.pending = None
         if monotonic() > expires:
+            self.pending = None
             return "La confirmación de archivos venció. Solicita de nuevo la operación."
         answer = text.strip().lower().strip(' .!')
-        if answer in ("sí", "si", "confirmo", "adelante", "hazlo", "si hazlo", "sí hazlo", "correcto"):
+        if answer in ("sí", "si", "ok", "confirmo", "adelante", "hazlo", "si hazlo", "sí hazlo", "correcto"):
+            self.pending = None
             return await self.execute(call)
         if answer in ("no", "cancela", "cancelar", "no gracias", "déjalo", "dejalo"):
+            self.pending = None
             return "Operación de archivos cancelada."
-        return None
+        return "Responde «sí» para confirmar o «no» para cancelar."
 
     async def handle(self, text: str) -> str | None:
         raw = text.strip()
@@ -97,14 +105,18 @@ class FileToolService:
                 return "El contenido del documento debe ser texto o secciones."
         if len(json.dumps(call.content, ensure_ascii=False)) > 100_000:
             return "El contenido solicitado supera el límite de generación."
-        # Show the concrete operation before changing files.
+        # Keep confirmation compact: the full generated content belongs in the file,
+        # not in the conversation.
         self.pending = (call, monotonic() + 120)
+        if call.tool == "create_file":
+            name = call.name or "archivo"
+            suffix = f".{call.file_type}"
+            if not name.casefold().endswith(suffix):
+                name += suffix
+            return f"Crear {name} en {call.path}. ¿Confirmas?"
+        action = {'create_folder':'Crear carpeta','move_item':'Mover','copy_item':'Copiar','rename_item':'Renombrar'}[call.tool]
         details = {key: getattr(call, key) for key in required}
-        action = {'create_folder':'crear carpeta','create_file':'crear archivo','move_item':'mover','copy_item':'copiar','rename_item':'renombrar'}[call.tool]
-        preview = ""
-        if call.content is not None:
-            preview = "\nContenido: " + json.dumps(call.content, ensure_ascii=False)[:1200]
-        return f"Voy a {action}: " + "; ".join(f"{key}: {value}" for key,value in details.items()) + preview + "\n¿Confirmas?"
+        return f"{action}: " + "; ".join(str(value) for value in details.values()) + ". ¿Confirmas?"
 
     async def execute(self, call: FileToolCall) -> str:
         try:

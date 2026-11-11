@@ -9,7 +9,7 @@ export type AssistantState =
 
 export interface ServerMessage {
   version: 1
-  type: 'assistant_state' | 'assistant_text' | 'conversation_cleared' | 'pong' | 'error'
+  type: 'assistant_state' | 'assistant_text' | 'response_cancelled' | 'conversation_cleared' | 'pong' | 'error'
   request_id?: string | null
   timestamp?: string
   payload: Record<string, unknown>
@@ -461,11 +461,12 @@ export async function synthesizeSpeech(
   voice?: string,
   model?: string,
   endpoint?: string,
-  fragments?: string[]
+  fragments?: string[],
+  signal?: AbortSignal
 ): Promise<{ blob: Blob; provider: string; cacheHit: boolean; fallbackFrom?: string }> {
   const response = await fetch(`${HTTP_URL}/api/voice/synthesize`, {
     method: 'POST',
-    signal: AbortSignal.timeout(60000),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, fragments, use_rvc: useRvc, engine, voice, model, endpoint })
   })
@@ -573,6 +574,10 @@ export class AssistantSocket {
     })
   }
 
+  cancelResponse(requestId: string): void {
+    this.send({ version: 1, type: 'cancel_response', request_id: crypto.randomUUID(), payload: { request_id: requestId } })
+  }
+
   close(): void {
     this.manuallyClosed = true
     window.clearTimeout(this.reconnectTimer)
@@ -589,9 +594,10 @@ export class AssistantSocket {
 
 
 export interface LLMConfig {
-  provider: 'gemini' | 'ollama'
+  provider: 'gemini' | 'ollama' | 'llama_cpp'
   gemini_model: string
   ollama_model: string
+  llama_cpp_model: string
 }
 export async function getLLMConfig(): Promise<LLMConfig> {
   const response = await fetch(`${HTTP_URL}/api/llm/config`)

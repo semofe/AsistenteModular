@@ -18,6 +18,12 @@ def create_conversation_router(
     async def get_conversation_history() -> dict[str, object]:
         return {"messages": [{"role": m.role, "content": m.content} for m in orchestrator.history]} if orchestrator else {"messages": []}
 
+    @router.delete("/conversation/history")
+    async def clear_conversation_history() -> dict[str, bool]:
+        if orchestrator is not None:
+            orchestrator.clear_conversation()
+        return {"cleared": True}
+
     @router.get("/conversation/preferences")
     async def get_conversation_preferences() -> dict[str, object]:
         return await asyncio.to_thread(conversation_preferences.get)

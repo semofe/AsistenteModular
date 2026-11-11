@@ -177,6 +177,10 @@ def create_voice_router(
                 except VoiceError:
                     # Si Vosk no está instalado, conserva el comportamiento anterior.
                     pass
+            # Una frase de activación completa ya fue confirmada por Vosk. No
+            # esperes a Faster Whisper: la interfaz necesita mostrarse de inmediato.
+            if context == "dormant" and wake_only:
+                return {"text": wake_only, "engine": "vosk"}
             if not text:
                 try:
                     text = await asyncio.to_thread(voice.transcribe, input_path, hotwords)

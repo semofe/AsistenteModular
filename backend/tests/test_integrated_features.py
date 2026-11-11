@@ -15,6 +15,7 @@ from asistente.core.orchestrator import Orchestrator
 from asistente.memory.conversation_store import ConversationStore
 from asistente.providers.base import ChatProvider, GenerationResult
 from asistente.providers.ollama import OllamaProvider
+from asistente.providers.llama_cpp import LlamaCppProvider
 from asistente.storage.database import Database
 from asistente.storage.migrations import migrate
 from asistente.tools.file_dispatcher import FileToolService
@@ -49,14 +50,21 @@ class Provider(ChatProvider):
         return GenerationResult(text=json.dumps({'tool':'create_file','name':'prueba','path':'escritorio','file_type':'txt','content':'Hola'}))
 
 
+def test_file_tool_recognizes_natural_document_requests():
+    assert FileToolService.is_request('Dame un archivo Excel con los presidentes del Perú')
+    assert FileToolService.is_request('Hazme un documento Word')
+    assert not FileToolService.is_request('Dame información sobre Excel')
+
+
 def test_orchestrator_file_action_waits_for_confirmation(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, 'home', lambda: tmp_path)
     (tmp_path/'Desktop').mkdir()
     orch = Orchestrator(Provider(), tmp_path/'personality.txt', file_tools=FileToolService())
     reply = asyncio.run(orch.handle_text('Crea un archivo txt en escritorio'))
     assert '¿Confirmas?' in reply.text
+    assert 'Contenido:' not in reply.text
     assert not (tmp_path/'Desktop/prueba.txt').exists()
-    reply = asyncio.run(orch.handle_text('sí'))
+    reply = asyncio.run(orch.handle_text('ok'))
     assert (tmp_path/'Desktop/prueba.txt').read_text() == 'Hola'
     assert 'creado' in reply.text
 
@@ -182,6 +190,19 @@ def test_ollama_payload_and_token_count():
     assert result.text=='Respuesta'
 
 
+def test_llama_cpp_payload_and_token_count():
+    from asistente.providers.base import ChatMessage
+    async def request(self,url,*,json):
+        assert url=='http://127.0.0.1:8080/v1/chat/completions'
+        assert json['model']=='modelo-local'
+        assert json['messages'][0]['content']=='Hola'
+        return httpx.Response(200,json={'choices':[{'message':{'content':'Respuesta local'}}],'usage':{'prompt_tokens':5,'completion_tokens':2,'total_tokens':7}},request=httpx.Request('POST',url))
+    with patch.object(httpx.AsyncClient,'post',request):
+        result=asyncio.run(LlamaCppProvider('modelo-local').generate([ChatMessage('user','Hola')]))
+    assert result.total_tokens==7
+    assert result.text=='Respuesta local'
+
+
 def test_llm_configuration_applies_without_restart(tmp_path):
     credentials=SimpleNamespace(get=lambda provider:'test-api-key',set=lambda *args:None)
     voice=SimpleNamespace(credentials=credentials)
@@ -194,8 +215,12 @@ def test_llm_configuration_applies_without_restart(tmp_path):
         assert response.status_code==200
         assert isinstance(orch.provider,OllamaProvider)
         assert orch.provider.model=='local-test'
+        response=client.put('/api/llm/config',json={'provider':'llama_cpp','gemini_model':'gemini-test','ollama_model':'local-test','llama_cpp_model':'modelo-local'})
+        assert response.status_code==200
+        assert isinstance(orch.provider,LlamaCppProvider)
+        assert orch.provider.model=='modelo-local'
         assert client.put('/api/voice/credentials/gemini',json={'api_key':'new-test-key'}).status_code==200
-        assert isinstance(orch.provider,OllamaProvider)
+        assert isinstance(orch.provider,LlamaCppProvider)
         assert client.put('/api/llm/config',json={'provider':'invalid','gemini_model':'x','ollama_model':'y'}).status_code==422
 
 @pytest.mark.parametrize('command,expected',[

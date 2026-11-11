@@ -59,7 +59,7 @@ import {
 } from './services/backend'
 
 
-const llmConfig = ref<LLMConfig>({provider: 'gemini', gemini_model: 'gemini-3.6-flash', ollama_model: 'llama3.2:1b'})
+const llmConfig = ref<LLMConfig>({provider: 'gemini', gemini_model: 'gemini-3.6-flash', ollama_model: 'llama3.2:1b', llama_cpp_model: 'Qwen3-8B-64k-Josiefied-Uncensored-NEO-Max-D_AU-Q4_K_M-imat'})
 const savingLLM = ref(false)
 const syncingApps = ref(false)
 const modelStatus = ref('')
@@ -174,6 +174,9 @@ let chunks: Blob[] = []
 let currentAudio: HTMLAudioElement | undefined
 let speechPending = false
 let speechQueue = Promise.resolve()
+let speechAbortController: AbortController | undefined
+let speechVersion = 0
+const activeRequestId = ref<string | null>(null)
 let microphoneResumeAt = 0
 let activationStream: MediaStream | undefined
 let activationListenerVersion = 0
@@ -199,6 +202,7 @@ const { memories, memoryDraft, memoryBusy, refreshMemory, storeMemory, removeMem
 const { reminders, reminderTitle, reminderAt, reminderAction, reminderAccessId, routines, routineName, routineTime, routineAccessIds, routineDays, scheduleBusy, refreshSchedule, pollScheduledEvents, storeReminder, removeReminder, toggleRoutineDay, storeRoutine, removeRoutine } = useSchedule(messages, speak)
 
 const canSend = computed(() => ['idle', 'dormant'].includes(state.value) && input.value.trim().length > 0)
+const canStop = computed(() => state.value === 'processing' || state.value === 'speaking' || speechPending)
 const regularAccessEntries = computed(() => accessEntries.value.filter((entry) => entry.close_policy !== 'window'))
 const launcherEntries = computed(() => accessEntries.value.filter((entry) => entry.close_policy === 'window'))
 const filteredEdgeVoices = computed(() => {
@@ -563,7 +567,7 @@ function sendRecognizedText(text: string): void {
   activateSession()
   messages.value.push({ id: crypto.randomUUID(), role: 'user', text: clean })
   try {
-    socket.sendText(clean)
+    activeRequestId.value = socket.sendText(clean)
   } catch (error) {
     messages.value.push({ id: crypto.randomUUID(), role: 'system', text: String(error) })
   }
@@ -912,12 +916,26 @@ async function playResponseAudio(blob: Blob): Promise<void> {
 }
 
 function speak(text: string, fragments?: string[]): Promise<void> {
-  const response = speechQueue.then(() => speakResponse(text, fragments))
+  const version = speechVersion
+  const response = speechQueue.then(() => version === speechVersion ? speakResponse(text, fragments, version) : undefined)
   speechQueue = response.catch(() => {})
   return response
 }
 
-async function speakResponse(text: string, fragments?: string[]): Promise<void> {
+function stopCurrentResponse(): void {
+  if (activeRequestId.value) socket.cancelResponse(activeRequestId.value)
+  activeRequestId.value = null
+  speechVersion++
+  speechAbortController?.abort()
+  speechAbortController = undefined
+  currentAudio?.pause()
+  speechQueue = Promise.resolve()
+  speechPending = false
+  if (state.value === 'processing' || state.value === 'speaking') state.value = activationEnabled.value && !activationSession.value ? 'dormant' : 'idle'
+  scheduleInactivity()
+}
+
+async function speakResponse(text: string, fragments: string[] | undefined, version: number): Promise<void> {
   if (!voiceOutput.value) return
   const spokenText = text
     .replace(/```[\s\S]*?```/g, ' ')
@@ -926,6 +944,8 @@ async function speakResponse(text: string, fragments?: string[]): Promise<void> 
     .trim()
   if (!/[\p{L}\p{N}]{2}/u.test(spokenText)) return
   speechPending = true
+  const controller = new AbortController()
+  speechAbortController = controller
   cancelActivationUtterance()
   try {
     state.value = 'speaking'
@@ -949,8 +969,10 @@ async function speakResponse(text: string, fragments?: string[]): Promise<void> 
           ? 's2-pro'
           : customModel.value || undefined,
       ttsEngine.value === 'custom' ? customEndpoint.value : undefined,
-      fragments
+      fragments,
+      controller.signal
     )
+    if (version !== speechVersion) return
     if (result.fallbackFrom) {
       messages.value.push({
         id: crypto.randomUUID(),
@@ -965,9 +987,10 @@ async function speakResponse(text: string, fragments?: string[]): Promise<void> 
     })
     await playResponseAudio(result.blob)
   } catch (error) {
-    messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Voz: ${String(error)}` })
+    if (!(error instanceof DOMException && error.name === 'AbortError')) messages.value.push({ id: crypto.randomUUID(), role: 'system', text: `Voz: ${String(error)}` })
   } finally {
-    speechPending = false
+    if (speechAbortController === controller) speechAbortController = undefined
+    if (version === speechVersion) speechPending = false
     microphoneResumeAt = Date.now() + 900
     if (state.value === 'speaking') {
       state.value = activationEnabled.value && !activationSession.value ? 'dormant' : 'idle'
@@ -978,10 +1001,13 @@ async function speakResponse(text: string, fragments?: string[]): Promise<void> 
 
 function handleMessage(message: ServerMessage): void {
   if (message.type === 'assistant_state') {
+    if (message.request_id && activeRequestId.value && message.request_id !== activeRequestId.value) return
     const nextState = String(message.payload.state) as AssistantState
     if (['processing', 'speaking'].includes(nextState)) cancelActivationUtterance()
     if (!speechPending) state.value = nextState
   } else if (message.type === 'assistant_text') {
+    if (message.request_id !== activeRequestId.value) return
+    activeRequestId.value = null
     if (activationEnabled.value) activateSession(false)
     const usage = (message.payload.usage ?? {}) as Record<string, unknown>
     messages.value.push({
@@ -993,7 +1019,8 @@ function handleMessage(message: ServerMessage): void {
         output: Number(usage.output_tokens ?? 0),
         thinking: Number(usage.thinking_tokens ?? 0),
         total: Number(usage.total_tokens ?? 0),
-        session: Number(usage.session_tokens ?? 0)
+        session: Number(usage.session_tokens ?? 0),
+        responseMs: Number(usage.response_time_ms ?? 0)
       }
     })
     const fragments = Array.isArray(message.payload.speech_fragments)
@@ -1015,6 +1042,9 @@ function handleMessage(message: ServerMessage): void {
     }
   } else if (message.type === 'conversation_cleared') {
     messages.value = [{ id: crypto.randomUUID(), role: 'system', text: 'Conversación reiniciada.' }]
+  } else if (message.type === 'response_cancelled') {
+    activeRequestId.value = null
+    if (!speechPending) state.value = activationEnabled.value && !activationSession.value ? 'dormant' : 'idle'
   } else if (message.type === 'error') {
     messages.value.push({
       id: crypto.randomUUID(),
@@ -1231,13 +1261,15 @@ onBeforeUnmount(() => {
                 <strong>Modelo de conversación</strong>
                 <small>Elige el proveedor y el modelo que usa el asistente para responder.</small>
               </div>
-              <select v-model="llmConfig.provider" aria-label="Proveedor de conversación"><option value="gemini">Gemini</option><option value="ollama">Ollama local</option></select>
+              <select v-model="llmConfig.provider" aria-label="Proveedor de conversación"><option value="gemini">Gemini</option><option value="ollama">Ollama local</option><option value="llama_cpp">llama.cpp local</option></select>
               <input v-if="llmConfig.provider === 'gemini'" v-model="llmConfig.gemini_model" aria-label="Modelo Gemini" placeholder="Modelo Gemini" />
-              <input v-else v-model="llmConfig.ollama_model" aria-label="Modelo Ollama" placeholder="Modelo Ollama" />
+              <input v-else-if="llmConfig.provider === 'ollama'" v-model="llmConfig.ollama_model" aria-label="Modelo Ollama" placeholder="Modelo Ollama" />
+              <input v-else v-model="llmConfig.llama_cpp_model" aria-label="Modelo llama.cpp" placeholder="Modelo llama.cpp" />
               <button type="button" :disabled="savingLLM" @click="updateLLM">{{ savingLLM ? 'Aplicando…' : 'Aplicar modelo' }}</button>
+              <small v-if="llmConfig.provider === 'llama_cpp'">Inicia llama-server en http://127.0.0.1:8080 antes de conversar.</small>
               <small>{{ modelStatus }}</small>
             </section>
-            <div v-if="!configured" class="notice">
+            <div v-if="llmConfig.provider === 'gemini' && !configured" class="notice">
               Gemini aún no tiene una clave configurada. Puedes probar la conexión y añadirla después.
             </div>
             <div class="settings-title">
@@ -1558,6 +1590,7 @@ onBeforeUnmount(() => {
         :aria-label="recording ? 'Detener grabación' : 'Hablar'"
         @click="toggleRecording"
       >{{ recording ? '■' : '●' }}</button>
+      <button v-if="canStop" class="stop" type="button" aria-label="Detener respuesta" title="Detener respuesta y voz" @click="stopCurrentResponse">■</button>
       <input v-model="input" autocomplete="off" :placeholder="`Escribe algo para ${assistantName}…`" />
       <button class="send" :disabled="!canSend" aria-label="Enviar">➜</button>
     </form>

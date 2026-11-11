@@ -21,6 +21,18 @@ _OPENABLE_EXTENSIONS = {
     *(extension for extensions in EXTENSION_CATEGORIES.values() for extension in extensions),
 }
 
+# Windows normally exposes these folders with English directory names, while
+# the assistant accepts Spanish names in commands (for example, "en escritorio").
+_FOLDER_LOCATION_ALIASES = {
+    "escritorio": "desktop",
+    "documentos": "documents",
+    "descargas": "downloads",
+    "imagenes": "pictures",
+    "fotos": "pictures",
+    "videos": "videos",
+    "musica": "music",
+}
+
 
 class FileAccessError(ValueError):
     pass
@@ -57,7 +69,13 @@ class FileAccessService:
                 folder = Path(str(configured_folder)).resolve(strict=True)
             except OSError:
                 continue
-            for candidate in folder.rglob("*"):
+            # Desktop often contains source trees and dependency folders. Index only
+            # files placed directly on it, matching the fast Desktop search policy.
+            try:
+                candidates = folder.iterdir() if normalize_name(folder.name) == "desktop" else folder.rglob("*")
+            except OSError:
+                continue
+            for candidate in candidates:
                 if len(entries) >= self.MAX_INDEXED_FILES:
                     break
                 try:
@@ -93,8 +111,11 @@ class FileAccessService:
         for entry in self.index():
             name = _normalize_name(Path(entry["path"]).stem)
             name_tokens = set(name.split())
+            compact_name = "".join(name.split())
             score = sum(
-                3 if token in name_tokens else 2 if any(token in name_token for name_token in name_tokens) else 0
+                3 if token in name_tokens or token == compact_name
+                else 2 if token in compact_name or any(token in name_token for name_token in name_tokens)
+                else 0
                 for token in query_tokens
             )
             if score:
@@ -115,6 +136,11 @@ class FileAccessService:
         location = location.removeprefix("la carpeta ").removeprefix("carpeta ")
         if not name:
             return []
+        normalized_location = _normalize_name(location)
+        location_names = {
+            normalized_location,
+            _FOLDER_LOCATION_ALIASES.get(normalized_location, normalized_location),
+        } - {""}
 
         full_query: set[Path] = set()
         exact: set[Path] = set()
@@ -125,12 +151,22 @@ class FileAccessService:
                 folder = Path(configured_folder).expanduser().resolve(strict=True)
             except (OSError, RuntimeError):
                 continue
-            for directory, _, filenames in os.walk(folder):
+            # Desktop must remain quick even when it contains a development project
+            # (and therefore large directories such as node_modules). Whether or
+            # not the user says "en escritorio", only consider direct files there.
+            if normalize_name(folder.name) == "desktop":
+                try:
+                    directories = [(str(folder), [], [item.name for item in folder.iterdir() if item.is_file()])]
+                except OSError:
+                    continue
+            else:
+                directories = os.walk(folder)
+            for directory, _, filenames in directories:
                 if monotonic() > deadline:
                     raise FileAccessError("La búsqueda tardó demasiado.")
                 parent = Path(directory)
-                in_location = not location or any(
-                    normalize_name(part) == location for part in parent.parts
+                in_location = not location_names or any(
+                    normalize_name(part) in location_names for part in parent.parts
                 )
                 for filename in filenames:
                     if monotonic() > deadline:

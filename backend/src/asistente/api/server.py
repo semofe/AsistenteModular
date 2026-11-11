@@ -26,6 +26,7 @@ from asistente.config.paths import ensure_data_directories
 from asistente.core.orchestrator import Orchestrator
 from asistente.providers.gemini import GeminiProvider
 from asistente.providers.ollama import OllamaProvider
+from asistente.providers.llama_cpp import LlamaCppProvider
 from asistente.config.settings import LLMPreferenceStore
 from asistente.memory.conversation_store import ConversationStore
 from asistente.tools.file_dispatcher import FileToolService
@@ -106,6 +107,8 @@ def create_app() -> FastAPI:
     ) if api_key else None
     if llm_config["provider"] == "ollama":
         provider = OllamaProvider(llm_config["ollama_model"])
+    elif llm_config["provider"] == "llama_cpp":
+        provider = LlamaCppProvider(llm_config["llama_cpp_model"])
     conversation_store = ConversationStore(database)
     orchestrator = Orchestrator(
         provider=provider,
@@ -173,7 +176,11 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "assistant": assistant_profile.get()["name"],
-            "provider": "ollama" if isinstance(orchestrator.provider, OllamaProvider) else "gemini",
+            "provider": (
+                "ollama" if isinstance(orchestrator.provider, OllamaProvider)
+                else "llama_cpp" if isinstance(orchestrator.provider, LlamaCppProvider)
+                else "gemini"
+            ),
             "model": getattr(orchestrator.provider, "model", model),
             "provider_configured": orchestrator.provider is not None,
             "stt_engine": "hybrid_vosk_whisper",

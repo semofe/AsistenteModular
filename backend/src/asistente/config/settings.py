@@ -111,7 +111,10 @@ class FileAccessPreferenceStore:
 
 
 DEFAULT_LLM_PREFERENCES = {
-    "provider": "gemini", "gemini_model": "gemini-3.6-flash", "ollama_model": "llama3.2:1b"
+    "provider": "gemini",
+    "gemini_model": "gemini-3.6-flash",
+    "ollama_model": "llama3.2:1b",
+    "llama_cpp_model": "Qwen3-8B-64k-Josiefied-Uncensored-NEO-Max-D_AU-Q4_K_M-imat",
 }
 
 class LLMPreferenceStore:
@@ -127,7 +130,7 @@ class LLMPreferenceStore:
 
     def save(self, values: dict[str, str]) -> dict[str, str]:
         result = {**self.get(), **values}
-        if result["provider"] not in ("gemini", "ollama"):
+        if result["provider"] not in ("gemini", "ollama", "llama_cpp"):
             raise ValueError("Proveedor desconocido.")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")

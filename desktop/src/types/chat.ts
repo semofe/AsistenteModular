@@ -8,5 +8,6 @@ export interface ChatItem {
     thinking: number
     total: number
     session: number
+    responseMs: number
   }
 }

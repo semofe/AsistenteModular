@@ -5,6 +5,7 @@ import path from 'node:path'
 
 let backend: ChildProcess | undefined
 let quitting = false
+let clearingConversation = false
 let assistantWindow: BrowserWindow | undefined
 let tray: Tray | undefined
 
@@ -70,12 +71,23 @@ function startBackend(): void {
   })
 }
 
+async function clearConversationHistory(): Promise<void> {
+  try {
+    await fetch('http://127.0.0.1:8765/api/conversation/history', {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(3000)
+    })
+  } catch {
+    // The backend may already be stopping; quitting must still remain immediate.
+  }
+}
+
 function createWindow(): void {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize
   const window = new BrowserWindow({
-    width: Math.min(860, width),
+    width: Math.min(400, width),
     height: Math.min(760, height),
-    minWidth: Math.min(460, width),
+    minWidth: Math.min(360, width),
     minHeight: Math.min(520, height),
     title: 'Asistente',
     frame: false,
@@ -176,7 +188,13 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (!clearingConversation) {
+    event.preventDefault()
+    clearingConversation = true
+    void clearConversationHistory().finally(() => app.quit())
+    return
+  }
   quitting = true
   backend?.kill()
 })
